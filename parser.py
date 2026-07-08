@@ -8,8 +8,9 @@ def get_field(layer, field):
 def read_packets(filename):
 
     capture = pyshark.FileCapture(
-        filename,
-        tshark_path="/Applications/Wireshark.app/Contents/MacOS/tshark"
+    filename,
+    tshark_path="/Applications/Wireshark.app/Contents/MacOS/tshark",
+    display_filter="diameter"
     )
 
     count = 0
@@ -44,6 +45,10 @@ def read_packets(filename):
                 "subscription_type": get_field(d, "subscription_id_type"),
                 "ipv4": get_field(d, "framed_ip_address"),
                 "ipv6": get_field(d, "framed_ipv6_prefix"),
+                "request_type": get_field(d, "cc_request_type"),
+                "called_station_id": get_field(d, "called_station_id"),
+                "charging_characteristics": get_field(d, "3gpp_charging_characteristics"),
+                "rat_type": get_field(d, "3gpp_rat_type"),
                 "command": get_field(d, "cmd_code"),
                 "request_flag": get_field(d, "flags_request"),
                 "application_id": get_field(d, "application_id"),
