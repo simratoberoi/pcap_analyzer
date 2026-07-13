@@ -36,7 +36,14 @@ def build_indexes(sessions):
     return session_ips, session_subscriptions
 
 
-def resolve_selected_sessions(sessions, session=None, subscription=None, ipv4=None, ipv6=None):
+def resolve_selected_sessions(
+    sessions,
+    session=None,
+    subscription=None,
+    ipv4=None,
+    ipv6=None,
+    result_code=None,
+):
     session_ips, session_subscriptions = build_indexes(sessions)
     selected_sessions = set()
 
@@ -65,10 +72,41 @@ def resolve_selected_sessions(sessions, session=None, subscription=None, ipv4=No
         }
         selected_sessions.update(target_sessions)
 
+    if result_code:
+        target_sessions = {
+            session_id
+            for session_id, packets in sessions.items()
+            if any(str(pkt.get("result_code")) == str(result_code) for pkt in packets)
+        }
+        selected_sessions.update(target_sessions)
+
     return selected_sessions
 
 
-def iter_matching_packets(sessions, selected_sessions):
+def iter_matching_packets(sessions, selected_sessions=None, result_code=None):
+    if result_code:
+        matching_requests = []
+
+        for packets in sessions.values():
+            ccrs = {}
+
+            for pkt in packets:
+                if pkt["request_flag"] == "1":  
+                    ccrs[pkt["hop_by_hop"]] = pkt
+
+            for pkt in packets:
+                if (
+                    pkt["request_flag"] == "0"
+                    and str(pkt.get("result_code")) == str(result_code)
+                ):
+                    req = ccrs.get(pkt["hop_by_hop"])
+                    if req:
+                        matching_requests.append(req)
+
+        for pkt in matching_requests:
+            yield pkt
+        return
+
     for packets in sessions.values():
         for pkt in packets:
             if selected_sessions and pkt["session"] not in selected_sessions:

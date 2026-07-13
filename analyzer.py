@@ -11,6 +11,7 @@ def main():
     parser.add_argument("--subscription")
     parser.add_argument("--ipv4")
     parser.add_argument("--ipv6")
+    parser.add_argument("--ResultCode")
 
     args = parser.parse_args()
 
@@ -21,6 +22,7 @@ def main():
         subscription=args.subscription,
         ipv4=args.ipv4,
         ipv6=args.ipv6,
+        result_code= args.ResultCode
     )
 
     print(build_output_text(sessions, selected_sessions))
