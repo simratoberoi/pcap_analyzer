@@ -22,10 +22,16 @@ def main():
         subscription=args.subscription,
         ipv4=args.ipv4,
         ipv6=args.ipv6,
-        result_code= args.ResultCode
+        result_code=args.ResultCode,
     )
 
-    print(build_output_text(sessions, selected_sessions))
+    print(
+        build_output_text(
+            sessions,
+            selected_sessions,
+            result_code=args.ResultCode,
+        )
+    )
 
 
 if __name__ == "__main__":

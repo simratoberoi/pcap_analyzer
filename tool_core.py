@@ -1,7 +1,11 @@
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 
 from manager import group_by_session
 from parser import read_packets
+
+
+IST = timezone(timedelta(hours=5, minutes=30))
 
 
 def request_type_label(pkt):
@@ -13,7 +17,10 @@ def request_type_label(pkt):
         "3": "Termination",
     }
 
-    return mapping.get(request_type, request_type or "Unknown")
+    if request_type is None:
+        return "Unknown"
+
+    return mapping.get(request_type, request_type)
 
 
 def load_sessions(path):
@@ -86,12 +93,16 @@ def resolve_selected_sessions(
 def iter_matching_packets(sessions, selected_sessions=None, result_code=None):
     if result_code:
         matching_requests = []
+        seen_requests = set()
 
-        for packets in sessions.values():
+        for session_id, packets in sessions.items():
+            if selected_sessions and session_id not in selected_sessions:
+                continue
+
             ccrs = {}
 
             for pkt in packets:
-                if pkt["request_flag"] == "1":  
+                if pkt["request_flag"] == "1":
                     ccrs[pkt["hop_by_hop"]] = pkt
 
             for pkt in packets:
@@ -100,7 +111,9 @@ def iter_matching_packets(sessions, selected_sessions=None, result_code=None):
                     and str(pkt.get("result_code")) == str(result_code)
                 ):
                     req = ccrs.get(pkt["hop_by_hop"])
-                    if req:
+                    request_key = (session_id, req["hop_by_hop"]) if req else None
+                    if req and request_key not in seen_requests:
+                        seen_requests.add(request_key)
                         matching_requests.append(req)
 
         for pkt in matching_requests:
@@ -114,11 +127,22 @@ def iter_matching_packets(sessions, selected_sessions=None, result_code=None):
             yield pkt
 
 
+def format_timestamp(timestamp):
+    try:
+        timestamp_value = float(timestamp)
+    except (TypeError, ValueError):
+        return str(timestamp)
+
+    return datetime.fromtimestamp(timestamp_value, tz=timezone.utc).astimezone(IST).strftime(
+        "%Y-%m-%d %H:%M:%S %Z"
+    )
+
+
 def format_packet(pkt):
     lines = [
         "=" * 80,
         f"Packet Number      : {pkt['number']}",
-        f"Timestamp          : {pkt['time']}",
+        f"Timestamp          : {format_timestamp(pkt['time'])}",
         f"Session ID         : {pkt['session']}",
         f"Subscription ID    : {pkt['subscription_id']}",
         f"Subscription Type  : {pkt['subscription_type']}",
@@ -147,11 +171,11 @@ def format_packet(pkt):
     return "\n".join(lines)
 
 
-def build_output_text(sessions, selected_sessions):
+def build_output_text(sessions, selected_sessions, result_code=None):
     output_lines = ["Reading packets...", "", f"Found {len(sessions)} sessions", ""]
     found = False
 
-    for pkt in iter_matching_packets(sessions, selected_sessions):
+    for pkt in iter_matching_packets(sessions, selected_sessions, result_code=result_code):
         found = True
         output_lines.append(format_packet(pkt))
 

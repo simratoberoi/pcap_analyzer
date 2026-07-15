@@ -186,6 +186,7 @@ with input_col:
             "Subscription ID",
             "Framed IP Address",
             "IPv6 Address",
+            "Result Code",
         ],
         label_visibility="collapsed",
     )
@@ -225,6 +226,7 @@ if run_analysis:
                 "subscription": None,
                 "ipv4": None,
                 "ipv6": None,
+                "result_code": None,
             }
 
             value = filter_value.strip()
@@ -235,6 +237,8 @@ if run_analysis:
                 filter_kwargs["subscription"] = value
             elif filter_type == "Framed IP Address":
                 filter_kwargs["ipv4"] = value
+            elif filter_type == "Result Code":
+                filter_kwargs["result_code"] = value
             else:
                 filter_kwargs["ipv6"] = value
 
@@ -246,6 +250,7 @@ if run_analysis:
             output_text = build_output_text(
                 sessions,
                 selected_sessions,
+                result_code=filter_kwargs["result_code"],
             )
 
         except Exception as exc:
