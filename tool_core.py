@@ -79,51 +79,81 @@ def resolve_selected_sessions(
         }
         selected_sessions.update(target_sessions)
 
-    if result_code:
-        target_sessions = {
-            session_id
-            for session_id, packets in sessions.items()
-            if any(str(pkt.get("result_code")) == str(result_code) for pkt in packets)
-        }
-        selected_sessions.update(target_sessions)
 
     return selected_sessions
 
 
 def iter_matching_packets(sessions, selected_sessions=None, result_code=None):
+
     if result_code:
-        matching_requests = []
-        seen_requests = set()
+
+        SUPPORTED_COMMANDS = {"258", "272", "274", "275"}
+
+        requests = {}
+        seen = set()
+        count = 0
 
         for session_id, packets in sessions.items():
+
             if selected_sessions and session_id not in selected_sessions:
                 continue
 
-            ccrs = {}
+            for pkt in packets:
+
+                command = str(pkt.get("command"))
+                request_flag = str(pkt.get("request_flag"))
+
+                if command in SUPPORTED_COMMANDS and request_flag == "1":
+
+                    key = (
+                        command,
+                        str(pkt.get("hop_by_hop")),
+                    )
+
+                    requests[key] = pkt
 
             for pkt in packets:
-                if pkt["request_flag"] == "1":
-                    ccrs[pkt["hop_by_hop"]] = pkt
 
-            for pkt in packets:
+                command = str(pkt.get("command"))
+                request_flag = str(pkt.get("request_flag"))
+
                 if (
-                    pkt["request_flag"] == "0"
+                    command in SUPPORTED_COMMANDS
+                    and request_flag == "0"
                     and str(pkt.get("result_code")) == str(result_code)
                 ):
-                    req = ccrs.get(pkt["hop_by_hop"])
-                    request_key = (session_id, req["hop_by_hop"]) if req else None
-                    if req and request_key not in seen_requests:
-                        seen_requests.add(request_key)
-                        matching_requests.append(req)
 
-        for pkt in matching_requests:
-            yield pkt
+                    key = (
+                        command,
+                        str(pkt.get("hop_by_hop")),
+                    )
+
+                    req = requests.get(key)
+
+                    if req:
+
+                        unique = (
+                            req["number"],
+                            req["session"],
+                        )
+
+                        if unique not in seen:
+                            seen.add(unique)
+                            yield req
+
+                            count += 1
+
+                            if count >= 10:
+                                return
+
         return
-
+    
     for packets in sessions.values():
         for pkt in packets:
+
             if selected_sessions and pkt["session"] not in selected_sessions:
                 continue
+
             yield pkt
 
 
