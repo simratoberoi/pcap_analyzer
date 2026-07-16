@@ -1,11 +1,22 @@
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from bisect import bisect_left
 
 from manager import group_by_session
 from parser import read_packets
+from diameter_utils import (
+    command_family,
+    is_request_flag_false,
+    is_request_flag_true,
+    is_supported_result_command,
+    normalize_text,
+    values_match,
+)
 
 
 IST = timezone(timedelta(hours=5, minutes=30))
+
+DEFAULT_RESULT_CODE_LIMIT = 50
 
 
 def request_type_label(pkt):
@@ -49,8 +60,16 @@ def resolve_selected_sessions(
     subscription=None,
     ipv4=None,
     ipv6=None,
-    result_code=None,
 ):
+    """Resolve the set of session IDs matching session/subscription/IP filters.
+
+    Note: result-code filtering is intentionally NOT handled here. It is
+    handled entirely by iter_result_code_packets, which needs to inspect
+    individual request/answer pairs rather than just session membership.
+    An empty return value here is treated by iter_result_code_packets as
+    "search all sessions", so result-code-only searches still work when
+    this function is called without session/subscription/ipv4/ipv6.
+    """
     session_ips, session_subscriptions = build_indexes(sessions)
     selected_sessions = set()
 
@@ -79,78 +98,115 @@ def resolve_selected_sessions(
         }
         selected_sessions.update(target_sessions)
 
-
     return selected_sessions
 
 
-def iter_matching_packets(sessions, selected_sessions=None, result_code=None):
+def is_supported_request(pkt):
+    return is_supported_result_command(pkt.get("command")) and is_request_flag_true(pkt.get("request_flag"))
 
-    if result_code:
 
-        SUPPORTED_COMMANDS = {"258", "272", "274", "275"}
+def is_supported_answer(pkt):
+    return is_supported_result_command(pkt.get("command")) and is_request_flag_false(pkt.get("request_flag"))
 
-        requests = {}
-        seen = set()
-        count = 0
 
-        for session_id, packets in sessions.items():
+def request_neighbors(request_positions, answer_index):
+    insertion_point = bisect_left(request_positions, answer_index)
+    previous_request_index = request_positions[insertion_point - 1] if insertion_point > 0 else None
+    next_request_index = request_positions[insertion_point] if insertion_point < len(request_positions) else None
 
-            if selected_sessions and session_id not in selected_sessions:
+    return previous_request_index, next_request_index
+
+
+def is_failed_result_code(result_code):
+    result_code = normalize_text(result_code)
+    return bool(result_code) and not result_code.startswith("2")
+
+
+def iter_result_code_packets(sessions, selected_sessions=None, result_code=None, limit=DEFAULT_RESULT_CODE_LIMIT):
+    """Yield request/answer packets matching result_code.
+
+    limit caps the number of matched *requests* across the whole search.
+    Pass limit=None to disable the cap entirely (may be slow/large on big
+    captures with a common result code).
+    """
+    result_code = normalize_text(result_code)
+    if not result_code:
+        return
+
+    seen = set()
+    matched_requests = set()
+    limit_reached = False
+
+    for session_id, packets in sessions.items():
+        if selected_sessions and session_id not in selected_sessions:
+            continue
+
+        requests_by_key = {}
+        request_positions = []
+
+        for index, pkt in enumerate(packets):
+            if not is_supported_request(pkt):
                 continue
 
-            for pkt in packets:
+            key = (
+                str(pkt.get("command")),
+                str(pkt.get("hop_by_hop")),
+            )
+            requests_by_key[key] = index
+            request_positions.append(index)
 
-                command = str(pkt.get("command"))
-                request_flag = str(pkt.get("request_flag"))
+        selected_indexes = set()
 
-                if command in SUPPORTED_COMMANDS and request_flag == "1":
+        for index, pkt in enumerate(packets):
+            if not is_supported_answer(pkt):
+                continue
 
-                    key = (
-                        command,
-                        str(pkt.get("hop_by_hop")),
-                    )
+            if not values_match(pkt.get("result_code"), result_code):
+                continue
 
-                    requests[key] = pkt
+            key = (
+                str(pkt.get("command")),
+                str(pkt.get("hop_by_hop")),
+            )
+            request_index = requests_by_key.get(key)
+            if request_index is not None:
+                request_unique = (session_id, packets[request_index].get("number"))
+                if request_unique not in matched_requests:
+                    if limit is not None and len(matched_requests) >= limit:
+                        limit_reached = True
+                        break
 
-            for pkt in packets:
+                    matched_requests.add(request_unique)
 
-                command = str(pkt.get("command"))
-                request_flag = str(pkt.get("request_flag"))
+                selected_indexes.add(request_index)
 
-                if (
-                    command in SUPPORTED_COMMANDS
-                    and request_flag == "0"
-                    and str(pkt.get("result_code")) == str(result_code)
-                ):
+            if is_failed_result_code(pkt.get("result_code")):
+                previous_request_index, next_request_index = request_neighbors(request_positions, index)
+                if previous_request_index is not None:
+                    selected_indexes.add(previous_request_index)
+                if next_request_index is not None:
+                    selected_indexes.add(next_request_index)
 
-                    key = (
-                        command,
-                        str(pkt.get("hop_by_hop")),
-                    )
+        if limit_reached or (limit is not None and len(matched_requests) >= limit):
+            break
 
-                    req = requests.get(key)
+        for index in sorted(selected_indexes):
+            pkt = packets[index]
+            unique = (pkt.get("session"), pkt.get("number"))
+            if unique in seen:
+                continue
 
-                    if req:
+            seen.add(unique)
+            yield pkt
 
-                        unique = (
-                            req["number"],
-                            req["session"],
-                        )
 
-                        if unique not in seen:
-                            seen.add(unique)
-                            yield req
-
-                            count += 1
-
-                            if count >= 10:
-                                return
-
+def iter_matching_packets(sessions, selected_sessions=None, result_code=None, limit=DEFAULT_RESULT_CODE_LIMIT):
+    if result_code:
+        yield from iter_result_code_packets(sessions, selected_sessions, result_code=result_code, limit=limit)
         return
-    
+
     for packets in sessions.values():
         for pkt in packets:
-
             if selected_sessions and pkt["session"] not in selected_sessions:
                 continue
 
@@ -169,6 +225,24 @@ def format_timestamp(timestamp):
 
 
 def format_packet(pkt):
+    bandwidth = pkt.get("bandwidth") or {}
+    flags = pkt.get("flags") or {}
+
+    flag_lines = []
+    if "Request" in flags:
+        flag_lines.append(f"Request Flag       : {flags['Request']}")
+
+    for flag_label, flag_value in flags.items():
+        if flag_label == "Request":
+            continue
+        flag_lines.append(f"{flag_label:<18} : {flag_value}")
+
+    bandwidth_lines = []
+    for field_label, field_value in bandwidth.items():
+        if field_value is None:
+            continue
+        bandwidth_lines.append(f"{field_label:<18} : {field_value}")
+
     lines = [
         "=" * 80,
         f"Packet Number      : {pkt['number']}",
@@ -182,11 +256,27 @@ def format_packet(pkt):
         f"Called Station Id  : {pkt['called_station_id']}",
         f"3GPP Charging Chars: {pkt['charging_characteristics']}",
         f"RAT Type           : {pkt['rat_type']}",
+        f"Command Name       : {command_family(pkt.get('command'))}",
+        f"Message Type       : {pkt.get('message_type') or command_family(pkt.get('command'))}",
+    ]
+
+    if bandwidth_lines:
+        lines.append("Bandwidth:")
+        lines.extend(bandwidth_lines)
+
+    lines.extend(
+        [
         f"Source             : {pkt['src']}",
         f"Destination        : {pkt['dst']}",
         f"Length             : {pkt['length']}",
         f"Command Code       : {pkt['command']}",
-        f"Request Flag       : {pkt['request_flag']}",
+    ]
+    )
+
+    lines.extend(flag_lines)
+
+    lines.extend(
+        [
         f"Application ID     : {pkt['application_id']}",
         f"Result Code        : {pkt['result_code']}",
         f"Origin Host        : {pkt['origin_host']}",
@@ -196,21 +286,38 @@ def format_packet(pkt):
         f"Hop-by-Hop ID      : {pkt['hop_by_hop']}",
         f"End-to-End ID      : {pkt['end_to_end']}",
         "-" * 80,
-    ]
+        ]
+    )
 
     return "\n".join(lines)
 
 
-def build_output_text(sessions, selected_sessions, result_code=None):
-    output_lines = ["Reading packets...", "", f"Found {len(sessions)} sessions", ""]
-    found = False
+def build_output_text(sessions, selected_sessions, result_code=None, limit=DEFAULT_RESULT_CODE_LIMIT, filter_summary=None):
+    output_lines = ["Reading packets...", "", f"Found {len(sessions)} sessions"]
 
-    for pkt in iter_matching_packets(sessions, selected_sessions, result_code=result_code):
+    if filter_summary:
+        output_lines.append(f"Filter: {filter_summary}")
+
+    output_lines.append("")
+
+    found = False
+    match_count = 0
+
+    for pkt in iter_matching_packets(sessions, selected_sessions, result_code=result_code, limit=limit):
         found = True
+        match_count += 1
         output_lines.append(format_packet(pkt))
 
+    if result_code and limit is not None and match_count >= limit:
+        output_lines.append(
+            f"(Result stopped at limit={limit} matched requests. "
+            "Increase or disable the limit to see more.)"
+        )
+
     if not found:
-        if selected_sessions:
+        if result_code:
+            output_lines.append("No matching packets found.")
+        elif selected_sessions:
             output_lines.append("No matching packets found.")
         else:
             output_lines.extend(["First 10 Sessions:", ""])

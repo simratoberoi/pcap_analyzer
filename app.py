@@ -5,7 +5,7 @@ from typing import Optional
 
 import streamlit as st
 
-from tool_core import build_output_text, load_sessions, resolve_selected_sessions
+from tool_core import DEFAULT_RESULT_CODE_LIMIT, build_output_text, load_sessions, resolve_selected_sessions
 
 
 st.set_page_config(
@@ -89,6 +89,16 @@ div[data-testid="stTextInput"] input:focus{
     box-shadow:none !important;
 }
 
+/* ---------- Number Input ---------- */
+
+div[data-testid="stNumberInput"] input{
+    background:white !important;
+    border:1px solid #cfd8e6 !important;
+    border-radius:12px !important;
+    color:rgb(38,39,48) !important;
+    box-shadow:none !important;
+}
+
 /* ---------- Headings ---------- */
 
 h1,h2,h3,h4,h5,h6,
@@ -162,9 +172,24 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# Placeholder forces an explicit choice - prevents Streamlit's selectbox
+# default (first item) from silently applying the wrong filter type when
+# a user types a value without touching the dropdown.
+FILTER_PLACEHOLDER = "-- Select a filter --"
+
+FILTER_OPTIONS = [
+    FILTER_PLACEHOLDER,
+    "Session ID",
+    "Subscription ID",
+    "Framed IP Address",
+    "IPv6 Address",
+    "Result Code",
+]
+
 uploaded_file = None
 filter_type = None
 filter_value = ""
+result_limit = DEFAULT_RESULT_CODE_LIMIT
 run_analysis = False
 
 input_col, _ = st.columns([1.2, 0.8], gap="large")
@@ -181,13 +206,8 @@ with input_col:
 
     filter_type = st.selectbox(
         "Filter by",
-        [
-            "Session ID",
-            "Subscription ID",
-            "Framed IP Address",
-            "IPv6 Address",
-            "Result Code",
-        ],
+        FILTER_OPTIONS,
+        index=0,
         label_visibility="collapsed",
     )
 
@@ -196,6 +216,15 @@ with input_col:
         placeholder="Enter filter value",
         label_visibility="collapsed",
     )
+
+    if filter_type == "Result Code":
+        result_limit = st.number_input(
+            "Max matched requests (0 = no limit)",
+            min_value=0,
+            value=DEFAULT_RESULT_CODE_LIMIT,
+            step=10,
+            help="Result-code searches can match a lot of requests. Cap how many are returned, or set 0 for no cap.",
+        )
 
     run_analysis = st.button(
         "Analyze",
@@ -209,6 +238,8 @@ output_text = ""
 if run_analysis:
     if not uploaded_file:
         st.error("Upload a file first.")
+    elif filter_type == FILTER_PLACEHOLDER:
+        st.error("Select a filter type from the dropdown.")
     elif not filter_value.strip():
         st.error("Enter a filter value.")
     else:
@@ -226,8 +257,8 @@ if run_analysis:
                 "subscription": None,
                 "ipv4": None,
                 "ipv6": None,
-                "result_code": None,
             }
+            result_code = None
 
             value = filter_value.strip()
 
@@ -237,20 +268,24 @@ if run_analysis:
                 filter_kwargs["subscription"] = value
             elif filter_type == "Framed IP Address":
                 filter_kwargs["ipv4"] = value
-            elif filter_type == "Result Code":
-                filter_kwargs["result_code"] = value
-            else:
+            elif filter_type == "IPv6 Address":
                 filter_kwargs["ipv6"] = value
+            elif filter_type == "Result Code":
+                result_code = value
 
             selected_sessions = resolve_selected_sessions(
                 sessions,
                 **filter_kwargs,
             )
 
+            limit = None if result_limit == 0 else result_limit
+
             output_text = build_output_text(
                 sessions,
                 selected_sessions,
-                result_code=filter_kwargs["result_code"],
+                result_code=result_code,
+                limit=limit,
+                filter_summary=f"{filter_type} = {value}",
             )
 
         except Exception as exc:
