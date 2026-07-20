@@ -9,6 +9,7 @@ from diameter_utils import (
     is_request_flag_false,
     is_request_flag_true,
     is_supported_result_command,
+    normalize_command_code,
     normalize_text,
     values_match,
 )
@@ -17,6 +18,16 @@ from diameter_utils import (
 IST = timezone(timedelta(hours=5, minutes=30))
 
 DEFAULT_RESULT_CODE_LIMIT = 50
+
+# The four command families selectable as a sub-filter on a Result Code
+# search. "code" must match a key in diameter_utils.COMMAND_METADATA.
+COMMAND_FILTER_CHOICES = [
+    {"code": "272", "label": "Credit-Control-Request/Answer", "note": "Request received by PCRF"},
+    {"code": "275", "label": "Session-Termination-Request/Answer", "note": "Request sent as well as received by PCRF"},
+    {"code": "274", "label": "Abort-Session-Request/Answer", "note": "Request sent by PCRF"},
+    {"code": "258", "label": "Re-Auth-Request/Answer", "note": "Request sent by PCRF"},
+    {"code": "265", "label": "AA-Request/Answer", "note": "Authentication-Authorization exchange"},
+]
 
 
 def request_type_label(pkt):
@@ -45,11 +56,11 @@ def build_indexes(sessions):
     for session_id, packets in sessions.items():
         for pkt in packets:
             if pkt.get("ipv4"):
-                session_ips[session_id].add(pkt["ipv4"])
+                session_ips[session_id].add(str(pkt["ipv4"]).strip())
             if pkt.get("ipv6"):
-                session_ips[session_id].add(pkt["ipv6"])
+                session_ips[session_id].add(str(pkt["ipv6"]).strip())
             if pkt.get("subscription_id"):
-                session_subscriptions[session_id].add(pkt["subscription_id"])
+                session_subscriptions[session_id].add(str(pkt["subscription_id"]).strip())
 
     return session_ips, session_subscriptions
 
@@ -61,19 +72,21 @@ def resolve_selected_sessions(
     ipv4=None,
     ipv6=None,
 ):
-    """Resolve the set of session IDs matching session/subscription/IP filters.
+    # No filter values supplied at all -> no session restriction (None),
+    # distinct from a filter that was supplied but matched zero sessions
+    # (empty set). Downstream code relies on this distinction: conflating
+    # the two used to make an unmatched filter (e.g. an IPv4 address not
+    # present in the capture) silently fall back to showing every packet
+    # in the capture instead of "no matches", which is what was blowing up
+    # the UI on large captures.
+    if not (session or subscription or ipv4 or ipv6):
+        return None
 
-    Note: result-code filtering is intentionally NOT handled here. It is
-    handled entirely by iter_result_code_packets, which needs to inspect
-    individual request/answer pairs rather than just session membership.
-    An empty return value here is treated by iter_result_code_packets as
-    "search all sessions", so result-code-only searches still work when
-    this function is called without session/subscription/ipv4/ipv6.
-    """
     session_ips, session_subscriptions = build_indexes(sessions)
     selected_sessions = set()
 
     if session:
+        session = str(session).strip()
         selected_sessions.add(session)
         target_ips = session_ips.get(session, set())
 
@@ -82,6 +95,7 @@ def resolve_selected_sessions(
                 selected_sessions.add(session_id)
 
     if subscription:
+        subscription = str(subscription).strip()
         target_sessions = {
             session_id
             for session_id, subscriptions in session_subscriptions.items()
@@ -90,7 +104,7 @@ def resolve_selected_sessions(
         selected_sessions.update(target_sessions)
 
     if ipv4 or ipv6:
-        target_ip = ipv4 or ipv6
+        target_ip = str(ipv4 or ipv6).strip()
         target_sessions = {
             session_id
             for session_id, ips in session_ips.items()
@@ -122,23 +136,26 @@ def is_failed_result_code(result_code):
     return bool(result_code) and not result_code.startswith("2")
 
 
-def iter_result_code_packets(sessions, selected_sessions=None, result_code=None, limit=DEFAULT_RESULT_CODE_LIMIT):
-    """Yield request/answer packets matching result_code.
+def iter_result_code_packets(
+    sessions,
+    selected_sessions=None,
+    result_code=None,
+    limit=DEFAULT_RESULT_CODE_LIMIT,
+    command_filter=None,
+):
 
-    limit caps the number of matched *requests* across the whole search.
-    Pass limit=None to disable the cap entirely (may be slow/large on big
-    captures with a common result code).
-    """
     result_code = normalize_text(result_code)
     if not result_code:
         return
+
+    command_filter = normalize_command_code(command_filter)
 
     seen = set()
     matched_requests = set()
     limit_reached = False
 
     for session_id, packets in sessions.items():
-        if selected_sessions and session_id not in selected_sessions:
+        if selected_sessions is not None and session_id not in selected_sessions:
             continue
 
         requests_by_key = {}
@@ -169,6 +186,18 @@ def iter_result_code_packets(sessions, selected_sessions=None, result_code=None,
                 str(pkt.get("hop_by_hop")),
             )
             request_index = requests_by_key.get(key)
+
+            if command_filter:
+                # The command-family sub-filter only gates whether this failed
+                # answer's entry is included at all, based on the command of
+                # its own corresponding request. If there's no corresponding
+                # request to check, or its command doesn't match, skip this
+                # answer entirely (its before/after context is skipped too).
+                if request_index is None:
+                    continue
+                if normalize_command_code(packets[request_index].get("command")) != command_filter:
+                    continue
+
             if request_index is not None:
                 request_unique = (session_id, packets[request_index].get("number"))
                 if request_unique not in matched_requests:
@@ -187,9 +216,6 @@ def iter_result_code_packets(sessions, selected_sessions=None, result_code=None,
                 if next_request_index is not None:
                     selected_indexes.add(next_request_index)
 
-        if limit_reached or (limit is not None and len(matched_requests) >= limit):
-            break
-
         for index in sorted(selected_indexes):
             pkt = packets[index]
             unique = (pkt.get("session"), pkt.get("number"))
@@ -199,15 +225,30 @@ def iter_result_code_packets(sessions, selected_sessions=None, result_code=None,
             seen.add(unique)
             yield pkt
 
+        if limit_reached or (limit is not None and len(matched_requests) >= limit):
+            break
 
-def iter_matching_packets(sessions, selected_sessions=None, result_code=None, limit=DEFAULT_RESULT_CODE_LIMIT):
+
+def iter_matching_packets(
+    sessions,
+    selected_sessions=None,
+    result_code=None,
+    limit=DEFAULT_RESULT_CODE_LIMIT,
+    command_filter=None,
+):
     if result_code:
-        yield from iter_result_code_packets(sessions, selected_sessions, result_code=result_code, limit=limit)
+        yield from iter_result_code_packets(
+            sessions,
+            selected_sessions,
+            result_code=result_code,
+            limit=limit,
+            command_filter=command_filter,
+        )
         return
 
     for packets in sessions.values():
         for pkt in packets:
-            if selected_sessions and pkt["session"] not in selected_sessions:
+            if selected_sessions is not None and pkt["session"] not in selected_sessions:
                 continue
 
             yield pkt
@@ -292,7 +333,14 @@ def format_packet(pkt):
     return "\n".join(lines)
 
 
-def build_output_text(sessions, selected_sessions, result_code=None, limit=DEFAULT_RESULT_CODE_LIMIT, filter_summary=None):
+def build_output_text(
+    sessions,
+    selected_sessions,
+    result_code=None,
+    limit=DEFAULT_RESULT_CODE_LIMIT,
+    filter_summary=None,
+    command_filter=None,
+):
     output_lines = ["Reading packets...", "", f"Found {len(sessions)} sessions"]
 
     if filter_summary:
@@ -303,7 +351,13 @@ def build_output_text(sessions, selected_sessions, result_code=None, limit=DEFAU
     found = False
     match_count = 0
 
-    for pkt in iter_matching_packets(sessions, selected_sessions, result_code=result_code, limit=limit):
+    for pkt in iter_matching_packets(
+        sessions,
+        selected_sessions,
+        result_code=result_code,
+        limit=limit,
+        command_filter=command_filter,
+    ):
         found = True
         match_count += 1
         output_lines.append(format_packet(pkt))
@@ -317,7 +371,7 @@ def build_output_text(sessions, selected_sessions, result_code=None, limit=DEFAU
     if not found:
         if result_code:
             output_lines.append("No matching packets found.")
-        elif selected_sessions:
+        elif selected_sessions is not None:
             output_lines.append("No matching packets found.")
         else:
             output_lines.extend(["First 10 Sessions:", ""])

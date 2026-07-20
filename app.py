@@ -5,7 +5,13 @@ from typing import Optional
 
 import streamlit as st
 
-from tool_core import DEFAULT_RESULT_CODE_LIMIT, build_output_text, load_sessions, resolve_selected_sessions
+from tool_core import (
+    COMMAND_FILTER_CHOICES,
+    DEFAULT_RESULT_CODE_LIMIT,
+    build_output_text,
+    load_sessions,
+    resolve_selected_sessions,
+)
 
 
 st.set_page_config(
@@ -226,6 +232,35 @@ with input_col:
             help="Result-code searches can match a lot of requests. Cap how many are returned, or set 0 for no cap.",
         )
 
+        st.markdown(
+            "<div style='color:rgb(38,39,48);margin:0.6rem 0 0.3rem;font-weight:600;'>"
+            "Filter by request type</div>",
+            unsafe_allow_html=True,
+        )
+
+        if "command_filter_choice" not in st.session_state:
+            st.session_state.command_filter_choice = None
+
+        button_cols = st.columns(len(COMMAND_FILTER_CHOICES))
+        for col, choice in zip(button_cols, COMMAND_FILTER_CHOICES):
+            with col:
+                is_active = st.session_state.command_filter_choice == choice["code"]
+                if st.button(
+                    choice["label"],
+                    key=f"command_filter_btn_{choice['code']}",
+                    help=choice["note"],
+                    use_container_width=True,
+                    type="primary" if is_active else "secondary",
+                ):
+                    st.session_state.command_filter_choice = None if is_active else choice["code"]
+
+        active_choice = next(
+            (c for c in COMMAND_FILTER_CHOICES if c["code"] == st.session_state.command_filter_choice),
+            None,
+        )
+        if active_choice:
+            st.caption(f"Active: {active_choice['label']} — {active_choice['note']} (click again to clear)")
+
     run_analysis = st.button(
         "Analyze",
         use_container_width=True,
@@ -280,12 +315,28 @@ if run_analysis:
 
             limit = None if result_limit == 0 else result_limit
 
+            command_filter = None
+            filter_summary = f"{filter_type} = {value}"
+            if filter_type == "Result Code":
+                active_choice = next(
+                    (
+                        c
+                        for c in COMMAND_FILTER_CHOICES
+                        if c["code"] == st.session_state.get("command_filter_choice")
+                    ),
+                    None,
+                )
+                if active_choice:
+                    command_filter = active_choice["code"]
+                    filter_summary += f", Request Type = {active_choice['label']}"
+
             output_text = build_output_text(
                 sessions,
                 selected_sessions,
                 result_code=result_code,
                 limit=limit,
-                filter_summary=f"{filter_type} = {value}",
+                filter_summary=filter_summary,
+                command_filter=command_filter,
             )
 
         except Exception as exc:

@@ -22,6 +22,11 @@ COMMAND_METADATA = {
         "request": "Re-Auth-Request",
         "answer": "Re-Auth-Answer",
     },
+    "265": {
+        "family": "AA",
+        "request": "AA-Request",
+        "answer": "AA-Answer",
+    },
 }
 
 SUPPORTED_RESULT_COMMANDS = set(COMMAND_METADATA)
