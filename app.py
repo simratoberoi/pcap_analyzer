@@ -112,7 +112,7 @@ h1,h2,h3,h4,h5,h6,
     color:rgb(38,39,48) !important;
 }
 
-/* ---------- Button ---------- */
+/* ---------- Button (main CTA, e.g. Analyze) ---------- */
 
 .stButton button{
     background:#4285F4;
@@ -124,6 +124,39 @@ h1,h2,h3,h4,h5,h6,
 
 .stButton button:hover{
     background:#5b95f7;
+}
+
+/* ---------- Request-type filter chips ----------
+   Scoped to the request-type-filters container only, so these never
+   bleed into or get overridden by the main CTA button rule above.
+   Uniform, subtle look regardless of which command is active; the
+   active one gets a light tint instead of solid CTA-blue. */
+
+.st-key-request_type_filters div[data-testid="stButton"] button{
+    background:#ffffff !important;
+    border:1px solid #cfd8e6 !important;
+    color:rgb(90,99,116) !important;
+    font-weight:500 !important;
+    border-radius:8px !important;
+    box-shadow:none !important;
+}
+
+.st-key-request_type_filters div[data-testid="stButton"] button:hover{
+    background:#f3f6fb !important;
+    border-color:#a9bcd6 !important;
+    color:rgb(38,39,48) !important;
+}
+
+.st-key-request_type_filters div[data-testid="stButton"] button[kind="primary"]{
+    background:#eaf1fd !important;
+    border:1px solid #4285F4 !important;
+    color:#1a56c4 !important;
+    font-weight:600 !important;
+}
+
+.st-key-request_type_filters div[data-testid="stButton"] button[kind="primary"]:hover{
+    background:#dde9fc !important;
+    border-color:#3672db !important;
 }
 
 /* ---------- Output ---------- */
@@ -241,18 +274,19 @@ with input_col:
         if "command_filter_choice" not in st.session_state:
             st.session_state.command_filter_choice = None
 
-        button_cols = st.columns(len(COMMAND_FILTER_CHOICES))
-        for col, choice in zip(button_cols, COMMAND_FILTER_CHOICES):
-            with col:
-                is_active = st.session_state.command_filter_choice == choice["code"]
-                if st.button(
-                    choice["label"],
-                    key=f"command_filter_btn_{choice['code']}",
-                    help=choice["note"],
-                    use_container_width=True,
-                    type="primary" if is_active else "secondary",
-                ):
-                    st.session_state.command_filter_choice = None if is_active else choice["code"]
+        with st.container(key="request_type_filters"):
+            button_cols = st.columns(len(COMMAND_FILTER_CHOICES))
+            for col, choice in zip(button_cols, COMMAND_FILTER_CHOICES):
+                with col:
+                    is_active = st.session_state.command_filter_choice == choice["code"]
+                    if st.button(
+                        choice["label"],
+                        key=f"command_filter_btn_{choice['code']}",
+                        help=choice["note"],
+                        use_container_width=True,
+                        type="primary" if is_active else "secondary",
+                    ):
+                        st.session_state.command_filter_choice = None if is_active else choice["code"]
 
         active_choice = next(
             (c for c in COMMAND_FILTER_CHOICES if c["code"] == st.session_state.command_filter_choice),
