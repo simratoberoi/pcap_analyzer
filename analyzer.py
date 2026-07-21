@@ -2,16 +2,13 @@ import argparse
 
 from tool_core import DEFAULT_RESULT_CODE_LIMIT, build_output_text, load_sessions, resolve_selected_sessions
 
-
-# Short CLI aliases for the same four command families offered as buttons in
-# the UI. Keys are what --RequestType accepts; values are the diameter
-# command codes tool_core.build_output_text expects for command_filter.
 REQUEST_TYPE_ALIASES = {
-    "CCR": "272",  # Credit-Control-Request/Answer - Request received by PCRF
-    "STR": "275",  # Session-Termination-Request/Answer - Request sent as well as received by PCRF
-    "ASR": "274",  # Abort-Session-Request/Answer - Request sent by PCRF
-    "RAR": "258",  # Re-Auth-Request/Answer - Request sent by PCRF
-    "AA": "265",   # AA-Request/Answer - Authentication-Authorization exchange
+    "CCR": "272",  
+    "STR": "275",  
+    "ASR": "274",  
+    "RAR": "258", 
+    "AA": "265",  
+    "SLR": "8388635",
 }
 
 
@@ -36,7 +33,7 @@ def build_filter_summary(args):
 def main():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("pcap")
+    parser.add_argument("pcap", nargs="+", help="One or more .pcap/.pcapng files to analyze together")
     parser.add_argument("--session")
     parser.add_argument("--subscription")
     parser.add_argument("--ipv4")
@@ -52,7 +49,8 @@ def main():
             "STR=Session-Termination-Request/Answer (sent as well as received by PCRF), "
             "ASR=Abort-Session-Request/Answer (sent by PCRF), "
             "RAR=Re-Auth-Request/Answer (sent by PCRF), "
-            "AA=AA-Request/Answer (authentication-authorization exchange)."
+            "AA=AA-Request/Answer (authentication-authorization exchange), "
+            "SLR=Spending-Limit-Request/Answer (Sy interface, OCS spending limit)."
         ),
     )
     parser.add_argument(
@@ -60,7 +58,8 @@ def main():
         type=int,
         default=DEFAULT_RESULT_CODE_LIMIT,
         help=(
-            "Max number of matched requests to return for a --ResultCode search. "
+            "Max number of matching Requests to return for a --ResultCode search "
+            "(each matched Answer's corresponding Request is printed, not the whole session). "
             f"Default is {DEFAULT_RESULT_CODE_LIMIT}. Pass 0 for no limit."
         ),
     )

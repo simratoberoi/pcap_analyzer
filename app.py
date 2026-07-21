@@ -211,9 +211,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Placeholder forces an explicit choice - prevents Streamlit's selectbox
-# default (first item) from silently applying the wrong filter type when
-# a user types a value without touching the dropdown.
 FILTER_PLACEHOLDER = "-- Select a filter --"
 
 FILTER_OPTIONS = [
@@ -225,7 +222,12 @@ FILTER_OPTIONS = [
     "Result Code",
 ]
 
-uploaded_file = None
+if "is_processing" not in st.session_state:
+    st.session_state.is_processing = False
+if "output_text" not in st.session_state:
+    st.session_state.output_text = ""
+
+uploaded_files = None
 filter_type = None
 filter_value = ""
 result_limit = DEFAULT_RESULT_CODE_LIMIT
@@ -237,10 +239,12 @@ with input_col:
     st.markdown("<div class='panel'>", unsafe_allow_html=True)
     st.markdown("<div class='panel-title'>Input</div>", unsafe_allow_html=True)
 
-    uploaded_file = st.file_uploader(
-        "Upload file",
+    uploaded_files = st.file_uploader(
+        "Upload file(s)",
         type=None,
         label_visibility="collapsed",
+        accept_multiple_files=True,
+        disabled=st.session_state.is_processing,
     )
 
     filter_type = st.selectbox(
@@ -248,12 +252,14 @@ with input_col:
         FILTER_OPTIONS,
         index=0,
         label_visibility="collapsed",
+        disabled=st.session_state.is_processing,
     )
 
     filter_value = st.text_input(
         "Value",
         placeholder="Enter filter value",
         label_visibility="collapsed",
+        disabled=st.session_state.is_processing,
     )
 
     if filter_type == "Result Code":
@@ -262,7 +268,12 @@ with input_col:
             min_value=0,
             value=DEFAULT_RESULT_CODE_LIMIT,
             step=10,
-            help="Result-code searches can match a lot of requests. Cap how many are returned, or set 0 for no cap.",
+            help=(
+                "Result-code searches print each matching Answer's corresponding "
+                "Request only - not the whole session. Cap how many Requests are "
+                "returned, or set 0 for no cap."
+            ),
+            disabled=st.session_state.is_processing,
         )
 
         st.markdown(
@@ -285,6 +296,7 @@ with input_col:
                         help=choice["note"],
                         use_container_width=True,
                         type="primary" if is_active else "secondary",
+                        disabled=st.session_state.is_processing,
                     ):
                         st.session_state.command_filter_choice = None if is_active else choice["code"]
 
@@ -298,96 +310,124 @@ with input_col:
     run_analysis = st.button(
         "Analyze",
         use_container_width=True,
+        disabled=st.session_state.is_processing,
     )
 
     st.markdown("</div>", unsafe_allow_html=True)
 
-output_text = ""
-
-if run_analysis:
-    if not uploaded_file:
-        st.error("Upload a file first.")
+if run_analysis and not st.session_state.is_processing:
+    st.session_state.output_text = ""
+    if not uploaded_files:
+        st.error("Upload at least one file first.")
     elif filter_type == FILTER_PLACEHOLDER:
         st.error("Select a filter type from the dropdown.")
     elif not filter_value.strip():
         st.error("Enter a filter value.")
     else:
-        suffix = os.path.splitext(uploaded_file.name)[1]
+        st.session_state.is_processing = True
+        st.rerun()
 
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
-            temp_file.write(uploaded_file.getbuffer())
-            temp_path = temp_file.name
+if st.session_state.is_processing:
+    temp_paths = []
+    temp_path_to_name = {}
 
-        try:
-            sessions = load_sessions(temp_path)
+    try:
+        for uploaded in uploaded_files:
+            suffix = os.path.splitext(uploaded.name)[1]
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
+                temp_file.write(uploaded.getbuffer())
+                temp_path = temp_file.name
+            temp_paths.append(temp_path)
+            temp_path_to_name[temp_path] = uploaded.name
 
-            filter_kwargs: dict[str, Optional[str]] = {
-                "session": None,
-                "subscription": None,
-                "ipv4": None,
-                "ipv6": None,
-            }
-            result_code = None
+        with st.status("Reading packets...", expanded=True) as status:
 
-            value = filter_value.strip()
+            def progress_cb(count, path):
+                name = temp_path_to_name.get(path, path)
+                status.update(label=f"{name}: Processed {count} packets")
 
-            if filter_type == "Session ID":
-                filter_kwargs["session"] = value
-            elif filter_type == "Subscription ID":
-                filter_kwargs["subscription"] = value
-            elif filter_type == "Framed IP Address":
-                filter_kwargs["ipv4"] = value
-            elif filter_type == "IPv6 Address":
-                filter_kwargs["ipv6"] = value
-            elif filter_type == "Result Code":
-                result_code = value
+            sessions = load_sessions(temp_paths, progress_callback=progress_cb)
 
-            selected_sessions = resolve_selected_sessions(
-                sessions,
-                **filter_kwargs,
+            status.update(
+                label=f"Done reading — found {len(sessions)} session(s) across {len(temp_paths)} file(s)",
+                state="complete",
+                expanded=False,
             )
 
-            limit = None if result_limit == 0 else result_limit
+        filter_kwargs: dict[str, Optional[str]] = {
+            "session": None,
+            "subscription": None,
+            "ipv4": None,
+            "ipv6": None,
+        }
+        result_code = None
 
-            command_filter = None
-            filter_summary = f"{filter_type} = {value}"
-            if filter_type == "Result Code":
-                active_choice = next(
-                    (
-                        c
-                        for c in COMMAND_FILTER_CHOICES
-                        if c["code"] == st.session_state.get("command_filter_choice")
-                    ),
-                    None,
-                )
-                if active_choice:
-                    command_filter = active_choice["code"]
-                    filter_summary += f", Request Type = {active_choice['label']}"
+        value = filter_value.strip()
 
-            output_text = build_output_text(
-                sessions,
-                selected_sessions,
-                result_code=result_code,
-                limit=limit,
-                filter_summary=filter_summary,
-                command_filter=command_filter,
+        if filter_type == "Session ID":
+            filter_kwargs["session"] = value
+        elif filter_type == "Subscription ID":
+            filter_kwargs["subscription"] = value
+        elif filter_type == "Framed IP Address":
+            filter_kwargs["ipv4"] = value
+        elif filter_type == "IPv6 Address":
+            filter_kwargs["ipv6"] = value
+        elif filter_type == "Result Code":
+            result_code = value
+
+        selected_sessions = resolve_selected_sessions(
+            sessions,
+            **filter_kwargs,
+        )
+
+        limit = None if result_limit == 0 else result_limit
+
+        command_filter = None
+        filter_summary = f"{filter_type} = {value}"
+        if filter_type == "Result Code":
+            active_choice = next(
+                (
+                    c
+                    for c in COMMAND_FILTER_CHOICES
+                    if c["code"] == st.session_state.get("command_filter_choice")
+                ),
+                None,
             )
+            if active_choice:
+                command_filter = active_choice["code"]
+                filter_summary += f", Request Type = {active_choice['label']}"
 
-        except Exception as exc:
-            st.error(f"Unable to analyze file: {exc}")
+        filter_summary += f", Files = {', '.join(temp_path_to_name.values())}"
 
-        finally:
+        st.session_state.output_text = build_output_text(
+            sessions,
+            selected_sessions,
+            result_code=result_code,
+            limit=limit,
+            filter_summary=filter_summary,
+            command_filter=command_filter,
+        )
+
+    except Exception as exc:
+        st.session_state.output_text = ""
+        st.error(f"Unable to analyze file(s): {exc}")
+
+    finally:
+        for temp_path in temp_paths:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
+        st.session_state.is_processing = False
+
+    st.rerun()
 
 st.markdown("<div style='height:1rem;'></div>", unsafe_allow_html=True)
 
 st.markdown("<div class='panel'>", unsafe_allow_html=True)
 st.markdown("<div class='panel-title'>Output</div>", unsafe_allow_html=True)
 
-if output_text:
+if st.session_state.output_text:
     st.markdown(
-        f"<div class='output-box'>{escape(output_text)}</div>",
+        f"<div class='output-box'>{escape(st.session_state.output_text)}</div>",
         unsafe_allow_html=True,
     )
 else:

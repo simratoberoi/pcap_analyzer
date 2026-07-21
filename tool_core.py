@@ -1,6 +1,5 @@
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from bisect import bisect_left
 
 from manager import group_by_session
 from parser import read_packets
@@ -8,8 +7,9 @@ from diameter_utils import (
     command_family,
     is_request_flag_false,
     is_request_flag_true,
-    is_supported_result_command,
     normalize_command_code,
+    normalize_ip_value,
+    normalize_match_value,
     normalize_text,
     values_match,
 )
@@ -19,14 +19,13 @@ IST = timezone(timedelta(hours=5, minutes=30))
 
 DEFAULT_RESULT_CODE_LIMIT = 50
 
-# The four command families selectable as a sub-filter on a Result Code
-# search. "code" must match a key in diameter_utils.COMMAND_METADATA.
 COMMAND_FILTER_CHOICES = [
     {"code": "272", "label": "Credit-Control-Request/Answer", "note": "Request received by PCRF"},
     {"code": "275", "label": "Session-Termination-Request/Answer", "note": "Request sent as well as received by PCRF"},
     {"code": "274", "label": "Abort-Session-Request/Answer", "note": "Request sent by PCRF"},
     {"code": "258", "label": "Re-Auth-Request/Answer", "note": "Request sent by PCRF"},
     {"code": "265", "label": "AA-Request/Answer", "note": "Authentication-Authorization exchange"},
+    {"code": "8388635", "label": "Spending-Limit-Request/Answer", "note": "Sy interface (OCS spending limit)"},
 ]
 
 
@@ -45,22 +44,54 @@ def request_type_label(pkt):
     return mapping.get(request_type, request_type)
 
 
-def load_sessions(path):
-    return group_by_session(read_packets(path))
+def load_sessions(paths, progress_callback=None):
+    """Read one or more pcap files and group all their packets by
+    Diameter Session-Id into a single merged dict.
+    """
+    if isinstance(paths, str):
+        paths = [paths]
+
+    merged_sessions = defaultdict(list)
+
+    for path in paths:
+        def file_progress(count, _path=path):
+            progress_callback(count, _path)
+
+        file_sessions = group_by_session(
+            read_packets(path, progress_callback=file_progress if progress_callback else None)
+        )
+        for session_id, packets in file_sessions.items():
+            merged_sessions[session_id].extend(packets)
+
+    return merged_sessions
 
 
 def build_indexes(sessions):
+    """Index each session's Framed-IP-Address(es) and Subscription-Id(s).
+
+    IPs are normalized (case-folded, CIDR suffix stripped) so that a
+    Framed-IPv6-Prefix on one interface still matches the bare
+    Framed-IP-Address on another interface for the same subscriber -
+    this is what lets an Rx (AA-Request) session link to its Gx/Sy
+    session by shared IP.
+    """
     session_ips = defaultdict(set)
     session_subscriptions = defaultdict(set)
 
     for session_id, packets in sessions.items():
         for pkt in packets:
-            if pkt.get("ipv4"):
-                session_ips[session_id].add(str(pkt["ipv4"]).strip())
-            if pkt.get("ipv6"):
-                session_ips[session_id].add(str(pkt["ipv6"]).strip())
+            ipv4 = normalize_ip_value(pkt.get("ipv4"))
+            if ipv4:
+                session_ips[session_id].add(ipv4)
+
+            ipv6 = normalize_ip_value(pkt.get("ipv6"))
+            if ipv6:
+                session_ips[session_id].add(ipv6)
+
             if pkt.get("subscription_id"):
-                session_subscriptions[session_id].add(str(pkt["subscription_id"]).strip())
+                normalized_subscription = normalize_match_value(pkt["subscription_id"])
+                if normalized_subscription:
+                    session_subscriptions[session_id].add(normalized_subscription)
 
     return session_ips, session_subscriptions
 
@@ -74,66 +105,70 @@ def resolve_selected_sessions(
 ):
     # No filter values supplied at all -> no session restriction (None),
     # distinct from a filter that was supplied but matched zero sessions
-    # (empty set). Downstream code relies on this distinction: conflating
-    # the two used to make an unmatched filter (e.g. an IPv4 address not
-    # present in the capture) silently fall back to showing every packet
-    # in the capture instead of "no matches", which is what was blowing up
-    # the UI on large captures.
+    # (empty set).
     if not (session or subscription or ipv4 or ipv6):
         return None
 
     session_ips, session_subscriptions = build_indexes(sessions)
-    selected_sessions = set()
+
+    seed_sessions = set()
 
     if session:
-        session = str(session).strip()
-        selected_sessions.add(session)
-        target_ips = session_ips.get(session, set())
-
-        for session_id, ips in session_ips.items():
-            if ips & target_ips:
-                selected_sessions.add(session_id)
+        seed_sessions.add(str(session).strip())
 
     if subscription:
-        subscription = str(subscription).strip()
-        target_sessions = {
+        subscription = normalize_match_value(subscription)
+        seed_sessions.update(
             session_id
             for session_id, subscriptions in session_subscriptions.items()
             if subscription in subscriptions
-        }
-        selected_sessions.update(target_sessions)
+        )
 
     if ipv4 or ipv6:
-        target_ip = str(ipv4 or ipv6).strip()
-        target_sessions = {
+        target_ip = normalize_ip_value(ipv4 or ipv6)
+        seed_sessions.update(
             session_id
             for session_id, ips in session_ips.items()
             if target_ip in ips
-        }
-        selected_sessions.update(target_sessions)
+        )
+
+    # Cross-link (one hop): pulls in any session sharing an IP or a
+    # Subscription-Id with a seed session. This is what surfaces Rx
+    # (AA-Request) sessions - which carry only a Framed-IP-Address, no
+    # Subscription-Id - and Sy (Spending-Limit) sessions - which carry
+    # only a Subscription-Id, no Framed-IP-Address - regardless of
+    # which attribute (session/subscription/IP) was originally searched.
+    selected_sessions = set(seed_sessions)
+
+    seed_ips = set()
+    seed_subscriptions = set()
+    for session_id in seed_sessions:
+        seed_ips |= session_ips.get(session_id, set())
+        seed_subscriptions |= session_subscriptions.get(session_id, set())
+
+    if seed_ips:
+        selected_sessions.update(
+            session_id
+            for session_id, ips in session_ips.items()
+            if ips & seed_ips
+        )
+
+    if seed_subscriptions:
+        selected_sessions.update(
+            session_id
+            for session_id, subscriptions in session_subscriptions.items()
+            if subscriptions & seed_subscriptions
+        )
 
     return selected_sessions
 
 
-def is_supported_request(pkt):
-    return is_supported_result_command(pkt.get("command")) and is_request_flag_true(pkt.get("request_flag"))
+def is_request_packet(pkt):
+    return is_request_flag_true(pkt.get("request_flag"))
 
 
-def is_supported_answer(pkt):
-    return is_supported_result_command(pkt.get("command")) and is_request_flag_false(pkt.get("request_flag"))
-
-
-def request_neighbors(request_positions, answer_index):
-    insertion_point = bisect_left(request_positions, answer_index)
-    previous_request_index = request_positions[insertion_point - 1] if insertion_point > 0 else None
-    next_request_index = request_positions[insertion_point] if insertion_point < len(request_positions) else None
-
-    return previous_request_index, next_request_index
-
-
-def is_failed_result_code(result_code):
-    result_code = normalize_text(result_code)
-    return bool(result_code) and not result_code.startswith("2")
+def is_answer_packet(pkt):
+    return is_request_flag_false(pkt.get("request_flag"))
 
 
 def iter_result_code_packets(
@@ -142,7 +177,20 @@ def iter_result_code_packets(
     result_code=None,
     limit=DEFAULT_RESULT_CODE_LIMIT,
     command_filter=None,
+    stats=None,
 ):
+    """Yield the Request that corresponds to every Answer matching
+    `result_code` (and `command_filter`, if given).
+
+    Only the Request is yielded - never the matching Answer, and never
+    any other packet from that Answer's session. Each Request is yielded
+    at most once even if it were somehow reachable via more than one
+    matching Answer.
+
+    `limit` caps the total number of Requests yielded (mixed request
+    types when `command_filter` is not set, or that command family's
+    requests when it is).
+    """
 
     result_code = normalize_text(result_code)
     if not result_code:
@@ -151,18 +199,20 @@ def iter_result_code_packets(
     command_filter = normalize_command_code(command_filter)
 
     seen = set()
-    matched_requests = set()
+    matched_count = 0
     limit_reached = False
 
     for session_id, packets in sessions.items():
+        if limit is not None and matched_count >= limit:
+            limit_reached = True
+            break
+
         if selected_sessions is not None and session_id not in selected_sessions:
             continue
 
         requests_by_key = {}
-        request_positions = []
-
         for index, pkt in enumerate(packets):
-            if not is_supported_request(pkt):
+            if not is_request_packet(pkt):
                 continue
 
             key = (
@@ -170,12 +220,9 @@ def iter_result_code_packets(
                 str(pkt.get("hop_by_hop")),
             )
             requests_by_key[key] = index
-            request_positions.append(index)
 
-        selected_indexes = set()
-
-        for index, pkt in enumerate(packets):
-            if not is_supported_answer(pkt):
+        for pkt in packets:
+            if not is_answer_packet(pkt):
                 continue
 
             if not values_match(pkt.get("result_code"), result_code):
@@ -186,47 +233,35 @@ def iter_result_code_packets(
                 str(pkt.get("hop_by_hop")),
             )
             request_index = requests_by_key.get(key)
+            if request_index is None:
+                # No corresponding Request was captured - nothing to
+                # output for this Answer.
+                continue
 
-            if command_filter:
-                # The command-family sub-filter only gates whether this failed
-                # answer's entry is included at all, based on the command of
-                # its own corresponding request. If there's no corresponding
-                # request to check, or its command doesn't match, skip this
-                # answer entirely (its before/after context is skipped too).
-                if request_index is None:
-                    continue
-                if normalize_command_code(packets[request_index].get("command")) != command_filter:
-                    continue
+            request_pkt = packets[request_index]
 
-            if request_index is not None:
-                request_unique = (session_id, packets[request_index].get("number"))
-                if request_unique not in matched_requests:
-                    if limit is not None and len(matched_requests) >= limit:
-                        limit_reached = True
-                        break
+            if command_filter and normalize_command_code(request_pkt.get("command")) != command_filter:
+                continue
 
-                    matched_requests.add(request_unique)
-
-                selected_indexes.add(request_index)
-
-            if is_failed_result_code(pkt.get("result_code")):
-                previous_request_index, next_request_index = request_neighbors(request_positions, index)
-                if previous_request_index is not None:
-                    selected_indexes.add(previous_request_index)
-                if next_request_index is not None:
-                    selected_indexes.add(next_request_index)
-
-        for index in sorted(selected_indexes):
-            pkt = packets[index]
-            unique = (pkt.get("session"), pkt.get("number"))
+            unique = (request_pkt.get("session"), request_pkt.get("number"))
             if unique in seen:
                 continue
 
-            seen.add(unique)
-            yield pkt
+            if limit is not None and matched_count >= limit:
+                limit_reached = True
+                break
 
-        if limit_reached or (limit is not None and len(matched_requests) >= limit):
+            seen.add(unique)
+            matched_count += 1
+            yield request_pkt
+
+        if limit is not None and matched_count >= limit:
+            limit_reached = True
             break
+
+    if stats is not None:
+        stats["matched_requests"] = matched_count
+        stats["limit_reached"] = limit_reached
 
 
 def iter_matching_packets(
@@ -235,6 +270,7 @@ def iter_matching_packets(
     result_code=None,
     limit=DEFAULT_RESULT_CODE_LIMIT,
     command_filter=None,
+    stats=None,
 ):
     if result_code:
         yield from iter_result_code_packets(
@@ -243,6 +279,7 @@ def iter_matching_packets(
             result_code=result_code,
             limit=limit,
             command_filter=command_filter,
+            stats=stats,
         )
         return
 
@@ -350,6 +387,7 @@ def build_output_text(
 
     found = False
     match_count = 0
+    stats = {}
 
     for pkt in iter_matching_packets(
         sessions,
@@ -357,12 +395,13 @@ def build_output_text(
         result_code=result_code,
         limit=limit,
         command_filter=command_filter,
+        stats=stats,
     ):
         found = True
         match_count += 1
         output_lines.append(format_packet(pkt))
 
-    if result_code and limit is not None and match_count >= limit:
+    if result_code and stats.get("limit_reached"):
         output_lines.append(
             f"(Result stopped at limit={limit} matched requests. "
             "Increase or disable the limit to see more.)"

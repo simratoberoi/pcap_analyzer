@@ -27,6 +27,11 @@ COMMAND_METADATA = {
         "request": "AA-Request",
         "answer": "AA-Answer",
     },
+    "8388635": {
+        "family": "Spending-Limit",
+        "request": "Spending-Limit-Request",
+        "answer": "Spending-Limit-Answer",
+    },
 }
 
 SUPPORTED_RESULT_COMMANDS = set(COMMAND_METADATA)
@@ -38,11 +43,6 @@ FLAG_LABELS = {
     "flags_potentially_retransmitted": "Potentially Retransmitted",
 }
 
-# tshark/pyshark can return this boolean AVP flag in different string forms
-# depending on version/build: "1"/"0", or "True"/"False". Both are handled
-# everywhere this flag is checked (here and in tool_core.py) via the two
-# helpers below, so there is exactly one definition of "what counts as a
-# request/answer flag" instead of divergent hardcoded comparisons.
 REQUEST_FLAG_TRUE_VALUES = {"1", "true", "True"}
 REQUEST_FLAG_FALSE_VALUES = {"0", "false", "False"}
 
@@ -74,6 +74,28 @@ def normalize_match_value(value):
         return numeric_tokens[0]
 
     return text
+
+
+def normalize_ip_value(value):
+    """Normalize an IPv4/IPv6 address for cross-session matching.
+
+    tshark can render Framed-IPv6-Prefix with a trailing CIDR suffix
+    (e.g. "2001:db8:1234::1/64") while a Framed-IP-Address AVP for the
+    same subscriber on a different interface (e.g. Rx AA-Request) comes
+    back as the bare address ("2001:db8:1234::1"). Without stripping the
+    suffix and normalizing case, an exact-string comparison between the
+    two silently fails, which breaks the Gx/Sy <-> Rx session cross-link
+    that the "same Framed-IP-Address" filters rely on.
+    """
+    text = normalize_text(value)
+    if not text:
+        return None
+
+    text = text.split("/", 1)[0].strip()
+    if not text:
+        return None
+
+    return text.lower()
 
 
 def values_match(left, right):

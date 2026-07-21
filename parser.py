@@ -13,7 +13,7 @@ def get_field(layer, field):
     return getattr(layer, field, None)
 
 
-def read_packets(filename):
+def read_packets(filename, progress_callback=None):
 
     capture = pyshark.FileCapture(
     filename,
@@ -30,6 +30,8 @@ def read_packets(filename):
 
             if count % 1000 == 0:
                 print(f"Processed {count} packets")
+                if progress_callback:
+                    progress_callback(count)
 
             if not hasattr(packet, "diameter"):
                 continue
@@ -87,6 +89,9 @@ def read_packets(filename):
                     "Max-Requested-Bandwidth-DL": get_field(d, "max_requested_bandwidth_dl"),
                 },
             }
+
+        if progress_callback:
+            progress_callback(count)
 
     finally:
         capture.close()
