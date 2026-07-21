@@ -71,6 +71,7 @@ def read_packets(filename, progress_callback=None):
                 "request_flag": request_flag,
                 "application_id": get_field(d, "application_id"),
                 "result_code": get_field(d, "result_code"),
+                "experimental_result_code": get_field(d, "experimental_result_code"),
                 "origin_host": get_field(d, "origin_host"),
                 "origin_realm": get_field(d, "origin_realm"),
                 "destination_host": get_field(d, "destination_host"),

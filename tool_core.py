@@ -225,7 +225,9 @@ def iter_result_code_packets(
             if not is_answer_packet(pkt):
                 continue
 
-            if not values_match(pkt.get("result_code"), result_code):
+            packet_code = ( pkt.get("experimental_result_code") or pkt.get("result_code"))
+
+            if not values_match(packet_code, result_code):
                 continue
 
             key = (
