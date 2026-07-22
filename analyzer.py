@@ -66,7 +66,6 @@ def main():
 
     args = parser.parse_args()
 
-    # Treat --limit 0 as "no limit"
     limit = None if args.limit == 0 else args.limit
 
     sessions = load_sessions(args.pcap)

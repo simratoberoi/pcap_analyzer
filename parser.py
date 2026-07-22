@@ -18,7 +18,9 @@ def read_packets(filename, progress_callback=None):
     capture = pyshark.FileCapture(
     filename,
     tshark_path="/Applications/Wireshark.app/Contents/MacOS/tshark",
-    display_filter="diameter"
+    display_filter="diameter",
+    keep_packets=False,        
+    custom_parameters=["-n"],  
     )
 
     count = 0

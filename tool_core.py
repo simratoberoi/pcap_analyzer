@@ -45,9 +45,6 @@ def request_type_label(pkt):
 
 
 def load_sessions(paths, progress_callback=None):
-    """Read one or more pcap files and group all their packets by
-    Diameter Session-Id into a single merged dict.
-    """
     if isinstance(paths, str):
         paths = [paths]
 
@@ -67,14 +64,7 @@ def load_sessions(paths, progress_callback=None):
 
 
 def build_indexes(sessions):
-    """Index each session's Framed-IP-Address(es) and Subscription-Id(s).
 
-    IPs are normalized (case-folded, CIDR suffix stripped) so that a
-    Framed-IPv6-Prefix on one interface still matches the bare
-    Framed-IP-Address on another interface for the same subscriber -
-    this is what lets an Rx (AA-Request) session link to its Gx/Sy
-    session by shared IP.
-    """
     session_ips = defaultdict(set)
     session_subscriptions = defaultdict(set)
 
@@ -103,9 +93,7 @@ def resolve_selected_sessions(
     ipv4=None,
     ipv6=None,
 ):
-    # No filter values supplied at all -> no session restriction (None),
-    # distinct from a filter that was supplied but matched zero sessions
-    # (empty set).
+
     if not (session or subscription or ipv4 or ipv6):
         return None
 
@@ -132,12 +120,6 @@ def resolve_selected_sessions(
             if target_ip in ips
         )
 
-    # Cross-link (one hop): pulls in any session sharing an IP or a
-    # Subscription-Id with a seed session. This is what surfaces Rx
-    # (AA-Request) sessions - which carry only a Framed-IP-Address, no
-    # Subscription-Id - and Sy (Spending-Limit) sessions - which carry
-    # only a Subscription-Id, no Framed-IP-Address - regardless of
-    # which attribute (session/subscription/IP) was originally searched.
     selected_sessions = set(seed_sessions)
 
     seed_ips = set()
@@ -179,18 +161,6 @@ def iter_result_code_packets(
     command_filter=None,
     stats=None,
 ):
-    """Yield the Request that corresponds to every Answer matching
-    `result_code` (and `command_filter`, if given).
-
-    Only the Request is yielded - never the matching Answer, and never
-    any other packet from that Answer's session. Each Request is yielded
-    at most once even if it were somehow reachable via more than one
-    matching Answer.
-
-    `limit` caps the total number of Requests yielded (mixed request
-    types when `command_filter` is not set, or that command family's
-    requests when it is).
-    """
 
     result_code = normalize_text(result_code)
     if not result_code:
@@ -201,6 +171,7 @@ def iter_result_code_packets(
     seen = set()
     matched_count = 0
     limit_reached = False
+    matches = []
 
     for session_id, packets in sessions.items():
         if limit is not None and matched_count >= limit:
@@ -236,8 +207,7 @@ def iter_result_code_packets(
             )
             request_index = requests_by_key.get(key)
             if request_index is None:
-                # No corresponding Request was captured - nothing to
-                # output for this Answer.
+
                 continue
 
             request_pkt = packets[request_index]
@@ -255,11 +225,15 @@ def iter_result_code_packets(
 
             seen.add(unique)
             matched_count += 1
-            yield request_pkt
+            matches.append(request_pkt)
 
         if limit is not None and matched_count >= limit:
             limit_reached = True
             break
+    matches.sort(key=lambda pkt: int(pkt["number"]))
+
+    for pkt in matches:
+        yield pkt
 
     if stats is not None:
         stats["matched_requests"] = matched_count
@@ -285,12 +259,18 @@ def iter_matching_packets(
         )
         return
 
+    matched_packets = []
+
     for packets in sessions.values():
         for pkt in packets:
             if selected_sessions is not None and pkt["session"] not in selected_sessions:
                 continue
 
-            yield pkt
+            matched_packets.append(pkt)
+
+    matched_packets.sort(key=lambda pkt: int(pkt["number"]))
+
+    yield from matched_packets
 
 
 def format_timestamp(timestamp):

@@ -55,12 +55,10 @@ def normalize_text(value):
 
 
 def is_request_flag_true(request_flag):
-    """True if request_flag indicates this packet IS a request."""
     return normalize_text(request_flag) in REQUEST_FLAG_TRUE_VALUES
 
 
 def is_request_flag_false(request_flag):
-    """True if request_flag indicates this packet IS an answer."""
     return normalize_text(request_flag) in REQUEST_FLAG_FALSE_VALUES
 
 
@@ -77,16 +75,6 @@ def normalize_match_value(value):
 
 
 def normalize_ip_value(value):
-    """Normalize an IPv4/IPv6 address for cross-session matching.
-
-    tshark can render Framed-IPv6-Prefix with a trailing CIDR suffix
-    (e.g. "2001:db8:1234::1/64") while a Framed-IP-Address AVP for the
-    same subscriber on a different interface (e.g. Rx AA-Request) comes
-    back as the bare address ("2001:db8:1234::1"). Without stripping the
-    suffix and normalizing case, an exact-string comparison between the
-    two silently fails, which breaks the Gx/Sy <-> Rx session cross-link
-    that the "same Framed-IP-Address" filters rely on.
-    """
     text = normalize_text(value)
     if not text:
         return None
