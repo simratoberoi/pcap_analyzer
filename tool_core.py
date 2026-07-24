@@ -145,6 +145,61 @@ def resolve_selected_sessions(
     return selected_sessions
 
 
+def collect_subscription_ids(sessions):
+    """Return a dict of {normalized_subscription_id: {value, type, sessions}}
+    covering every distinct subscription ID seen across all sessions."""
+
+    subscriptions = {}
+
+    for session_id, packets in sessions.items():
+        for pkt in packets:
+            raw_value = pkt.get("subscription_id")
+            normalized = normalize_match_value(raw_value)
+            if not normalized:
+                continue
+
+            entry = subscriptions.setdefault(
+                normalized,
+                {
+                    "value": normalize_text(raw_value),
+                    "type": pkt.get("subscription_type"),
+                    "sessions": set(),
+                },
+            )
+            entry["sessions"].add(session_id)
+            if entry["type"] is None and pkt.get("subscription_type") is not None:
+                entry["type"] = pkt.get("subscription_type")
+
+    return subscriptions
+
+
+def build_subscription_ids_output(sessions, filter_summary=None):
+    subscriptions = collect_subscription_ids(sessions)
+
+    output_lines = ["Reading packets...", "", f"Found {len(sessions)} sessions"]
+
+    if filter_summary:
+        output_lines.append(f"Filter: {filter_summary}")
+
+    output_lines.append("")
+
+    if not subscriptions:
+        output_lines.append("No subscription IDs found.")
+        return "\n".join(output_lines)
+
+    output_lines.append(f"Found {len(subscriptions)} unique Subscription ID(s):")
+    output_lines.append("")
+
+    for normalized_id in sorted(subscriptions):
+        entry = subscriptions[normalized_id]
+        type_label = entry["type"] if entry["type"] is not None else "Unknown"
+        output_lines.append(
+            f"Subscription ID: {entry['value']:<30} Type: {type_label:<10} Sessions: {len(entry['sessions'])}"
+        )
+
+    return "\n".join(output_lines)
+
+
 def is_request_packet(pkt):
     return is_request_flag_true(pkt.get("request_flag"))
 

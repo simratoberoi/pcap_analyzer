@@ -59,12 +59,19 @@ This opens (or prints a link to) `http://localhost:8501` in your browser.
 From there:
 1. Upload one or more `.pcap`/`.pcapng` files.
 2. Pick a filter type (Session ID, Subscription ID, Framed IP Address,
-   IPv6 Address, or Result Code) and enter a value.
+   IPv6 Address, Result Code, or List Subscription IDs) and enter a value
+   (not needed for List Subscription IDs).
 3. For Result Code searches, optionally cap the number of matches and/or
    narrow to a specific request-type chip (CCR, STR, ASR, RAR, AA, SLR).
 4. Click **Analyze**. Progress ("Processed N packets") streams live while
    the file(s) are read, and the button is disabled until the run finishes
    so a second click can't start an overlapping run.
+
+**List Subscription IDs** doesn't filter sessions at all - it scans every
+session in the upload(s) and prints every unique Subscription ID seen,
+along with its type and how many sessions each one appears in. Useful for
+discovering which subscribers are present in a capture before filtering
+down to one of them.
 
 ## Running the CLI
 
@@ -74,8 +81,9 @@ python analyzer.py <capture1.pcap> [capture2.pcap ...] [options]
 
 **Options:**
 
-| Flag             | Description                                                        |
-|------------------|----------------------------------------------------------------------|
+| Flag                  | Description                                                        |
+|-----------------------|----------------------------------------------------------------------|
+| `--list-subscriptions`| List every unique Subscription ID in the capture(s) and exit (ignores other filters) |
 | `--session`      | Filter by Session ID                                                |
 | `--subscription` | Filter by Subscription ID                                           |
 | `--ipv4`         | Filter by Framed IPv4 address                                       |
@@ -95,6 +103,13 @@ Multiple capture files can be passed at once and are analyzed together
 
 ```bash
 python analyzer.py capture1.pcap capture2.pcap --session abc123@example.com
+```
+
+To see every Subscription ID present in a capture (e.g. before deciding
+which one to filter on):
+
+```bash
+python analyzer.py capture.pcap --list-subscriptions
 ```
 
 ## Troubleshooting

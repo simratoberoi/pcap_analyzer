@@ -9,6 +9,7 @@ from tool_core import (
     COMMAND_FILTER_CHOICES,
     DEFAULT_RESULT_CODE_LIMIT,
     build_output_text,
+    build_subscription_ids_output,
     load_sessions,
     resolve_selected_sessions,
 )
@@ -220,7 +221,10 @@ FILTER_OPTIONS = [
     "Framed IP Address",
     "IPv6 Address",
     "Result Code",
+    "List Subscription IDs",
 ]
+
+NO_VALUE_FILTERS = {"List Subscription IDs"}
 
 if "is_processing" not in st.session_state:
     st.session_state.is_processing = False
@@ -255,12 +259,15 @@ with input_col:
         disabled=st.session_state.is_processing,
     )
 
-    filter_value = st.text_input(
-        "Value",
-        placeholder="Enter filter value",
-        label_visibility="collapsed",
-        disabled=st.session_state.is_processing,
-    )
+    if filter_type not in NO_VALUE_FILTERS:
+        filter_value = st.text_input(
+            "Value",
+            placeholder="Enter filter value",
+            label_visibility="collapsed",
+            disabled=st.session_state.is_processing,
+        )
+    else:
+        st.caption("No value needed — this lists every Subscription ID found in the upload(s).")
 
     if filter_type == "Result Code":
         result_limit = st.number_input(
@@ -321,7 +328,7 @@ if run_analysis and not st.session_state.is_processing:
         st.error("Upload at least one file first.")
     elif filter_type == FILTER_PLACEHOLDER:
         st.error("Select a filter type from the dropdown.")
-    elif not filter_value.strip():
+    elif filter_type not in NO_VALUE_FILTERS and not filter_value.strip():
         st.error("Enter a filter value.")
     else:
         st.session_state.is_processing = True
@@ -354,59 +361,68 @@ if st.session_state.is_processing:
                 expanded=False,
             )
 
-        filter_kwargs: dict[str, Optional[str]] = {
-            "session": None,
-            "subscription": None,
-            "ipv4": None,
-            "ipv6": None,
-        }
-        result_code = None
+        if filter_type == "List Subscription IDs":
+            filter_summary = f"List Subscription IDs, Files = {', '.join(temp_path_to_name.values())}"
 
-        value = filter_value.strip()
-
-        if filter_type == "Session ID":
-            filter_kwargs["session"] = value
-        elif filter_type == "Subscription ID":
-            filter_kwargs["subscription"] = value
-        elif filter_type == "Framed IP Address":
-            filter_kwargs["ipv4"] = value
-        elif filter_type == "IPv6 Address":
-            filter_kwargs["ipv6"] = value
-        elif filter_type == "Result Code":
-            result_code = value
-
-        selected_sessions = resolve_selected_sessions(
-            sessions,
-            **filter_kwargs,
-        )
-
-        limit = None if result_limit == 0 else result_limit
-
-        command_filter = None
-        filter_summary = f"{filter_type} = {value}"
-        if filter_type == "Result Code":
-            active_choice = next(
-                (
-                    c
-                    for c in COMMAND_FILTER_CHOICES
-                    if c["code"] == st.session_state.get("command_filter_choice")
-                ),
-                None,
+            st.session_state.output_text = build_subscription_ids_output(
+                sessions,
+                filter_summary=filter_summary,
             )
-            if active_choice:
-                command_filter = active_choice["code"]
-                filter_summary += f", Request Type = {active_choice['label']}"
 
-        filter_summary += f", Files = {', '.join(temp_path_to_name.values())}"
+        else:
+            filter_kwargs: dict[str, Optional[str]] = {
+                "session": None,
+                "subscription": None,
+                "ipv4": None,
+                "ipv6": None,
+            }
+            result_code = None
 
-        st.session_state.output_text = build_output_text(
-            sessions,
-            selected_sessions,
-            result_code=result_code,
-            limit=limit,
-            filter_summary=filter_summary,
-            command_filter=command_filter,
-        )
+            value = filter_value.strip()
+
+            if filter_type == "Session ID":
+                filter_kwargs["session"] = value
+            elif filter_type == "Subscription ID":
+                filter_kwargs["subscription"] = value
+            elif filter_type == "Framed IP Address":
+                filter_kwargs["ipv4"] = value
+            elif filter_type == "IPv6 Address":
+                filter_kwargs["ipv6"] = value
+            elif filter_type == "Result Code":
+                result_code = value
+
+            selected_sessions = resolve_selected_sessions(
+                sessions,
+                **filter_kwargs,
+            )
+
+            limit = None if result_limit == 0 else result_limit
+
+            command_filter = None
+            filter_summary = f"{filter_type} = {value}"
+            if filter_type == "Result Code":
+                active_choice = next(
+                    (
+                        c
+                        for c in COMMAND_FILTER_CHOICES
+                        if c["code"] == st.session_state.get("command_filter_choice")
+                    ),
+                    None,
+                )
+                if active_choice:
+                    command_filter = active_choice["code"]
+                    filter_summary += f", Request Type = {active_choice['label']}"
+
+            filter_summary += f", Files = {', '.join(temp_path_to_name.values())}"
+
+            st.session_state.output_text = build_output_text(
+                sessions,
+                selected_sessions,
+                result_code=result_code,
+                limit=limit,
+                filter_summary=filter_summary,
+                command_filter=command_filter,
+            )
 
     except Exception as exc:
         st.session_state.output_text = ""

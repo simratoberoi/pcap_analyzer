@@ -1,6 +1,12 @@
 import argparse
 
-from tool_core import DEFAULT_RESULT_CODE_LIMIT, build_output_text, load_sessions, resolve_selected_sessions
+from tool_core import (
+    DEFAULT_RESULT_CODE_LIMIT,
+    build_output_text,
+    build_subscription_ids_output,
+    load_sessions,
+    resolve_selected_sessions,
+)
 
 REQUEST_TYPE_ALIASES = {
     "CCR": "272",  
@@ -34,6 +40,11 @@ def main():
     parser = argparse.ArgumentParser()
 
     parser.add_argument("pcap", nargs="+", help="One or more .pcap/.pcapng files to analyze together")
+    parser.add_argument(
+        "--list-subscriptions",
+        action="store_true",
+        help="List every unique Subscription ID found in the capture(s) and exit (ignores other filters).",
+    )
     parser.add_argument("--session")
     parser.add_argument("--subscription")
     parser.add_argument("--ipv4")
@@ -69,6 +80,16 @@ def main():
     limit = None if args.limit == 0 else args.limit
 
     sessions = load_sessions(args.pcap)
+
+    if args.list_subscriptions:
+        print(
+            build_subscription_ids_output(
+                sessions,
+                filter_summary=f"Files = {', '.join(args.pcap)}",
+            )
+        )
+        return
+
     selected_sessions = resolve_selected_sessions(
         sessions,
         session=args.session,
