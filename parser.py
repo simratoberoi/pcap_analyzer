@@ -1,100 +1,214 @@
-import pyshark
+import csv
+import subprocess
 
 from diameter_utils import (
     command_family,
     extract_bandwidth_fields,
     extract_diameter_flags,
-    extract_layer_fields,
     message_type,
 )
 
+TSHARK_PATH = "/Applications/Wireshark.app/Contents/MacOS/tshark"
 
-def get_field(layer, field):
-    return getattr(layer, field, None)
+
+FRAME_FIELDS = [
+    "frame.number",
+    "frame.time_epoch",
+    "frame.len",
+    "ip.src",
+    "ip.dst",
+    "ipv6.src",
+    "ipv6.dst",
+]
+
+DIAMETER_SCALAR_FIELDS = [
+    "diameter.Session-Id",
+    "diameter.cmd.code",
+    "diameter.flags.request",
+    "diameter.CC-Request-Type",
+    "diameter.Called-Station-Id",
+    "diameter.3GPP-Charging-Characteristics",
+    "diameter.3GPP-RAT-Type",
+    "diameter.applicationId",
+    "diameter.Result-Code",
+    "diameter.Experimental-Result-Code",
+    "diameter.Origin-Host",
+    "diameter.Origin-Realm",
+    "diameter.Destination-Host",
+    "diameter.Destination-Realm",
+    "diameter.hopbyhopid",
+    "diameter.endtoendid",
+    "diameter.Framed-IP-Address",
+    "diameter.Framed-IP-Address.IPv4",
+    "diameter.Framed-IPv6-Prefix",
+]
+
+
+DIAMETER_REPEATING_FIELDS = [
+    "diameter.Subscription-Id-Data",
+    "diameter.Subscription-Id-Type",
+]
+
+
+DIAMETER_FLAG_FIELDS = [
+    "diameter.flags.request",
+    "diameter.flags.proxyable",
+    "diameter.flags.error",
+    "diameter.flags.T",  
+]
+
+
+DIAMETER_BANDWIDTH_FIELDS = [
+    "diameter.Max-Requested-Bandwidth-UL",
+    "diameter.Max-Requested-Bandwidth-DL",
+]
+
+
+def _dedupe(seq):
+    seen = set()
+    out = []
+    for item in seq:
+        if item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out
+
+
+ALL_FIELDS = _dedupe(
+    FRAME_FIELDS
+    + DIAMETER_SCALAR_FIELDS
+    + DIAMETER_REPEATING_FIELDS
+    + DIAMETER_FLAG_FIELDS
+    + DIAMETER_BANDWIDTH_FIELDS
+)
+
+
+def _first(value):
+    """Collapse a possibly-repeated ('a|b|c') field down to its first value."""
+    if value is None or value == "":
+        return None
+    return value.split("|")[0]
+
+
+def _first_of(row, *field_names):
+    """Try each field name in order, returning the first non-empty value
+    (after collapsing any repeats). Useful when a single logical value can
+    come from a resolved subfield or a raw fallback field."""
+    for field_name in field_names:
+        value = _first(row.get(field_name))
+        if value:
+            return value
+    return None
+
+
+def build_packet_dict(row):
+    """Build the same packet-dict shape the old pyshark-based parser produced,
+    from a single row (dict of tshark field name -> raw string value)."""
+
+    command = _first(row.get("diameter.cmd.code"))
+    request_flag = _first(row.get("diameter.flags.request"))
+
+    flags = extract_diameter_flags(row)
+    bandwidth = extract_bandwidth_fields(row)
+
+    src = row.get("ip.src") or row.get("ipv6.src") or None
+    dst = row.get("ip.dst") or row.get("ipv6.dst") or None
+
+    return {
+        "session": _first(row.get("diameter.Session-Id")),
+        "subscription_id": _first(row.get("diameter.Subscription-Id-Data")),
+        "subscription_type": _first(row.get("diameter.Subscription-Id-Type")),
+        "ipv4": _first_of(row, "diameter.Framed-IP-Address.IPv4", "diameter.Framed-IP-Address"),
+        "ipv6": _first(row.get("diameter.Framed-IPv6-Prefix")),
+        "request_type": _first(row.get("diameter.CC-Request-Type")),
+        "called_station_id": _first(row.get("diameter.Called-Station-Id")),
+        "charging_characteristics": _first(row.get("diameter.3GPP-Charging-Characteristics")),
+        "rat_type": _first(row.get("diameter.3GPP-RAT-Type")),
+        "command": command,
+        "command_name": command_family(command),
+        "message_type": message_type(command, request_flag),
+        "request_flag": request_flag,
+        "application_id": _first(row.get("diameter.applicationId")),
+        "result_code": _first(row.get("diameter.Result-Code")),
+        "experimental_result_code": _first(row.get("diameter.Experimental-Result-Code")),
+        "origin_host": _first(row.get("diameter.Origin-Host")),
+        "origin_realm": _first(row.get("diameter.Origin-Realm")),
+        "destination_host": _first(row.get("diameter.Destination-Host")),
+        "destination_realm": _first(row.get("diameter.Destination-Realm")),
+        "hop_by_hop": _first(row.get("diameter.hopbyhopid")),
+        "end_to_end": _first(row.get("diameter.endtoendid")),
+        "time": row.get("frame.time_epoch"),
+        "src": src,
+        "dst": dst,
+        "length": row.get("frame.len"),
+        "number": row.get("frame.number"),
+        "flags": flags,
+        "bandwidth": bandwidth,
+    }
 
 
 def read_packets(filename, progress_callback=None):
+    cmd = [
+        TSHARK_PATH,
+        "-n",
+        "-r", filename,
+        "-Y", "diameter",
+        "-T", "fields",
+    ]
+    for field in ALL_FIELDS:
+        cmd += ["-e", field]
+    cmd += [
+        "-E", "header=y",
+        "-E", "separator=\t",
+        "-E", "occurrence=a",
+        "-E", "aggregator=|",
+    ]
 
-    capture = pyshark.FileCapture(
-    filename,
-    tshark_path="/Applications/Wireshark.app/Contents/MacOS/tshark",
-    display_filter="diameter",
-    keep_packets=False,        
-    custom_parameters=["-n"],  
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
     )
 
     count = 0
+    header = None
 
     try:
-        for packet in capture:
+        reader = csv.reader(proc.stdout, delimiter="\t")
+        header = next(reader, None)
 
-            count += 1
+        if header is not None:
+            for row_values in reader:
+                count += 1
 
-            if count % 1000 == 0:
-                print(f"Processed {count} packets")
-                if progress_callback:
-                    progress_callback(count)
+                if count % 1000 == 0:
+                    print(f"Processed {count} packets")
+                    if progress_callback:
+                        progress_callback(count)
 
-            if not hasattr(packet, "diameter"):
-                continue
-
-            d = packet.diameter
-
-            src = None
-            dst = None
-
-            if hasattr(packet, "ip"):
-                src = packet.ip.src
-                dst = packet.ip.dst
-
-            elif hasattr(packet, "ipv6"):
-                src = packet.ipv6.src
-                dst = packet.ipv6.dst
-
-            command = extract_layer_fields(d, ["cmd_code"])
-            request_flag = extract_layer_fields(d, ["flags_request"])
-
-            bandwidth = extract_bandwidth_fields(d)
-            flags = extract_diameter_flags(d)
-
-            yield {
-                "session": get_field(d, "session_id"),
-                "subscription_id": get_field(d, "subscription_id_data"),
-                "subscription_type": get_field(d, "subscription_id_type"),
-                "ipv4": extract_layer_fields(d, ["framed_ip_address_ipv4", "framed_ip_address"]),
-                "ipv6": extract_layer_fields(d, ["framed_ipv6_prefix_ipv6", "framed_ipv6_prefix"]),
-                "request_type": get_field(d, "cc_request_type"),
-                "called_station_id": get_field(d, "called_station_id"),
-                "charging_characteristics": get_field(d, "3gpp_charging_characteristics"),
-                "rat_type": get_field(d, "3gpp_rat_type"),
-                "command": command,
-                "command_name": command_family(command),
-                "message_type": message_type(command, request_flag),
-                "request_flag": request_flag,
-                "application_id": get_field(d, "application_id"),
-                "result_code": get_field(d, "result_code"),
-                "experimental_result_code": get_field(d, "experimental_result_code"),
-                "origin_host": get_field(d, "origin_host"),
-                "origin_realm": get_field(d, "origin_realm"),
-                "destination_host": get_field(d, "destination_host"),
-                "destination_realm": get_field(d, "destination_realm"),
-                "hop_by_hop": get_field(d, "hop_by_hop_id"),
-                "end_to_end": get_field(d, "end_to_end_id"),
-                "time": packet.sniff_timestamp,
-                "src": src,
-                "dst": dst,
-                "length": packet.length,
-                "number": packet.number,
-                "flags": flags,
-                "bandwidth": {
-                    **bandwidth,
-                    "Max-Requested-Bandwidth-UL": get_field(d, "max_requested_bandwidth_ul"),
-                    "Max-Requested-Bandwidth-DL": get_field(d, "max_requested_bandwidth_dl"),
-                },
-            }
+                row = dict(zip(header, row_values))
+                yield build_packet_dict(row)
 
         if progress_callback:
             progress_callback(count)
 
     finally:
-        capture.close()
+        proc.stdout.close()
+        stderr_output = proc.stderr.read()
+        proc.stderr.close()
+        return_code = proc.wait()
+
+        if return_code != 0:
+            raise RuntimeError(
+                f"tshark exited with code {return_code} while reading "
+                f"{filename}: {stderr_output.strip()}"
+            )
+
+        if header is None:
+            raise RuntimeError(
+                f"tshark produced no output header while reading {filename} "
+                "(no diameter packets, or a field name in ALL_FIELDS is wrong "
+                "— check with `tshark -G fields | grep -i diameter`)"
+            )

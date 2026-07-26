@@ -37,10 +37,18 @@ COMMAND_METADATA = {
 SUPPORTED_RESULT_COMMANDS = set(COMMAND_METADATA)
 
 FLAG_LABELS = {
-    "flags_request": "Request",
-    "flags_proxiable": "Proxiable",
-    "flags_error": "Error",
-    "flags_potentially_retransmitted": "Potentially Retransmitted",
+    "diameter.flags.request": "Request",
+    "diameter.flags.proxyable": "Proxiable",
+    "diameter.flags.error": "Error",
+    "diameter.flags.T": "Potentially Retransmitted",
+}
+
+# Keys here must match parser.DIAMETER_BANDWIDTH_FIELDS.
+BANDWIDTH_FIELDS = {
+    "diameter.Max-Requested-Bandwidth-UL": "Max-Requested-Bandwidth-UL",
+    "diameter.Max-Requested-Bandwidth-DL": "Max-Requested-Bandwidth-DL",
+    "diameter.Guaranteed-Bitrate-UL": "Guaranteed-Bitrate-UL",
+    "diameter.Guaranteed-Bitrate-DL": "Guaranteed-Bitrate-DL",
 }
 
 REQUEST_FLAG_TRUE_VALUES = {"1", "true", "True"}
@@ -141,54 +149,30 @@ def command_code_display(command_code):
     return f"{command_code} ({family})"
 
 
-def layer_field_names(layer):
-    field_names = getattr(layer, "field_names", None)
-    if field_names is None:
-        return []
+def extract_diameter_flags(row):
+    """row is a dict of {tshark field name: raw string value} for one packet,
+    as produced by parser.build_packet_dict's input row."""
 
-    return list(field_names)
-
-
-def extract_layer_fields(layer, candidate_fields):
-    for field_name in candidate_fields:
-        value = getattr(layer, field_name, None)
-        if value is not None:
-            return value
-
-    return None
-
-
-def extract_diameter_flags(layer):
     flags = {}
-    for field_name in layer_field_names(layer):
-        if not field_name.startswith("flags_"):
+    for field_name, label in FLAG_LABELS.items():
+        value = row.get(field_name)
+        if value is None or value == "":
             continue
-
-        value = getattr(layer, field_name, None)
-        if value is None:
-            continue
-
-        label = FLAG_LABELS.get(field_name)
-        if label is None:
-            label = field_name.removeprefix("flags_").replace("_", " ").title()
 
         flags[label] = value
 
     return flags
 
 
-def extract_bandwidth_fields(layer):
+def extract_bandwidth_fields(row):
+    """row is a dict of {tshark field name: raw string value} for one packet."""
+
     bandwidth_fields = {}
-    for field_name in layer_field_names(layer):
-        normalized_name = field_name.lower()
-        if "bandwidth" not in normalized_name and "qos" not in normalized_name:
+    for field_name, label in BANDWIDTH_FIELDS.items():
+        value = row.get(field_name)
+        if value is None or value == "":
             continue
 
-        value = getattr(layer, field_name, None)
-        if value is None:
-            continue
-
-        label = field_name.replace("_", " ").title()
         bandwidth_fields[label] = value
 
     return bandwidth_fields
