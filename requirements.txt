@@ -1,6 +1,2 @@
 # Web UI
-streamlit>=1.34 
-
-# Diameter/pcap parsing
-pyshark>=0.6     
-                   
+streamlit>=1.34

@@ -84,16 +84,12 @@ ALL_FIELDS = _dedupe(
 
 
 def _first(value):
-    """Collapse a possibly-repeated ('a|b|c') field down to its first value."""
     if value is None or value == "":
         return None
     return value.split("|")[0]
 
 
 def _first_of(row, *field_names):
-    """Try each field name in order, returning the first non-empty value
-    (after collapsing any repeats). Useful when a single logical value can
-    come from a resolved subfield or a raw fallback field."""
     for field_name in field_names:
         value = _first(row.get(field_name))
         if value:
@@ -102,8 +98,6 @@ def _first_of(row, *field_names):
 
 
 def build_packet_dict(row):
-    """Build the same packet-dict shape the old pyshark-based parser produced,
-    from a single row (dict of tshark field name -> raw string value)."""
 
     command = _first(row.get("diameter.cmd.code"))
     request_flag = _first(row.get("diameter.flags.request"))

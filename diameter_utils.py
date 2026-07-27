@@ -165,7 +165,6 @@ def extract_diameter_flags(row):
 
 
 def extract_bandwidth_fields(row):
-    """row is a dict of {tshark field name: raw string value} for one packet."""
 
     bandwidth_fields = {}
     for field_name, label in BANDWIDTH_FIELDS.items():

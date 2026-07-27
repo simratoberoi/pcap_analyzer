@@ -13,16 +13,18 @@ files at once. Available both as a Streamlit web UI and a CLI.
 | `app.py`           | Streamlit web UI                                                |
 | `analyzer.py`      | Command-line entry point                                        |
 | `tool_core.py`     | Core filtering / session-resolution / output-formatting logic   |
-| `parser.py`        | Reads packets from a capture via pyshark/tshark                 |
+| `parser.py`        | Reads packets from a capture by invoking `tshark` directly (subprocess) |
 | `diameter_utils.py`| Diameter AVP and command-code helpers                           |
 | `manager.py`       | Groups packets into sessions                                    |
 
 ## Prerequisites
 
 1. **Python 3.9+**
-2. **Wireshark / tshark installed on your machine.** `pyshark` is just a
-   Python wrapper around the `tshark` command-line tool - it does not parse
-   captures itself, so tshark must be installed separately:
+2. **Wireshark / tshark installed on your machine.** `parser.py` invokes
+   the `tshark` command-line tool directly (via `subprocess`) and parses
+   its tab-separated field output - there's no Python wrapper library in
+   between, so `tshark` must be installed and reachable at the path
+   configured in `parser.py`:
    - **macOS:** install [Wireshark.app](https://www.wireshark.org/download.html).
      `tshark` ships inside it at
      `/Applications/Wireshark.app/Contents/MacOS/tshark`, which is the path
@@ -34,10 +36,10 @@ files at once. Available both as a Streamlit web UI and a CLI.
      tshark` on Debian/Ubuntu, `sudo dnf install wireshark-cli` on
      Fedora). It usually ends up on your `PATH` at `/usr/bin/tshark`.
 3. **If you're not on macOS, or Wireshark isn't installed at the default
-   path above**, open `parser.py` and change the `tshark_path` argument
-   passed to `pyshark.FileCapture(...)` to point at your `tshark` binary
-   (or find it with `which tshark` / `where tshark`). Without this, both
-   the UI and CLI will fail to read any capture.
+   path above**, open `parser.py` and change the `TSHARK_PATH` constant
+   near the top of the file to point at your `tshark` binary (or find it
+   with `which tshark` / `where tshark`). Without this, both the UI and
+   CLI will fail to read any capture.
 
 ## Setup
 
@@ -114,9 +116,14 @@ python analyzer.py capture.pcap --list-subscriptions
 
 ## Troubleshooting
 
-- **`TSharkNotFoundException` / similar errors on startup** - `tshark_path`
-  in `parser.py` doesn't point to a valid `tshark` binary on your system;
-  see step 3 under Prerequisites.
+- **`FileNotFoundError` / `[Errno 2] No such file or directory` for tshark,
+  or a `RuntimeError` saying tshark exited with a non-zero code** -
+  `TSHARK_PATH` in `parser.py` doesn't point to a valid `tshark` binary on
+  your system; see step 3 under Prerequisites.
+- **`RuntimeError: tshark produced no output header`** - tshark ran but a
+  field name in `parser.py`'s `ALL_FIELDS` list doesn't exist on your
+  installed tshark version; check with `tshark -G fields | grep -i
+  diameter`.
 - **No matching packets found** - double check the capture actually
   contains Diameter traffic (a `display_filter="diameter"` is applied
   under the hood), and that the ID/IP you're filtering on matches a value
