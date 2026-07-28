@@ -1,4 +1,7 @@
 import csv
+import os
+import platform
+import shutil
 import subprocess
 
 from diameter_utils import (
@@ -8,7 +11,46 @@ from diameter_utils import (
     message_type,
 )
 
-TSHARK_PATH = "/Applications/Wireshark.app/Contents/MacOS/tshark"
+
+def resolve_tshark_path():
+    env_path = os.environ.get("TSHARK_PATH")
+    if env_path and os.path.isfile(env_path):
+        return env_path
+
+    which_path = shutil.which("tshark") or shutil.which("tshark.exe")
+    if which_path:
+        return which_path
+
+    system = platform.system()
+    if system == "Darwin":
+        candidates = [
+            "/Applications/Wireshark.app/Contents/MacOS/tshark",
+            "/opt/homebrew/bin/tshark",
+            "/usr/local/bin/tshark",
+        ]
+    elif system == "Windows":
+        candidates = [
+            r"C:\Program Files\Wireshark\tshark.exe",
+            r"C:\Program Files (x86)\Wireshark\tshark.exe",
+        ]
+    else:
+        candidates = [
+            "/usr/bin/tshark",
+            "/usr/local/bin/tshark",
+            "/snap/bin/tshark",
+        ]
+
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+
+    raise FileNotFoundError(
+        "Could not find the tshark binary on this machine. Install "
+        "Wireshark/tshark, or set the TSHARK_PATH environment variable "
+        "to its full path, e.g.:\n"
+        "  export TSHARK_PATH=/path/to/tshark        # macOS/Linux\n"
+        "  set TSHARK_PATH=C:\\path\\to\\tshark.exe    # Windows"
+    )
 
 
 FRAME_FIELDS = [
@@ -54,7 +96,7 @@ DIAMETER_FLAG_FIELDS = [
     "diameter.flags.request",
     "diameter.flags.proxyable",
     "diameter.flags.error",
-    "diameter.flags.T",  
+    "diameter.flags.T",
 ]
 
 
@@ -141,9 +183,11 @@ def build_packet_dict(row):
     }
 
 
-def read_packets(filename, progress_callback=None):
+def read_packets(filename, progress_callback=None, tshark_path=None):
+    tshark_path = tshark_path or resolve_tshark_path()
+
     cmd = [
-        TSHARK_PATH,
+        tshark_path,
         "-n",
         "-r", filename,
         "-Y", "diameter",
