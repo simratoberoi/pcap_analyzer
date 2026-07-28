@@ -1,4 +1,6 @@
+import os
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 
 from manager import group_by_session
@@ -44,21 +46,59 @@ def request_type_label(pkt):
     return mapping.get(request_type, request_type)
 
 
-def load_sessions(paths, progress_callback=None):
+def _read_one_file(path):
+    """Runs inside a worker process. Must be a top-level function (not a
+    closure/lambda) so it can be pickled and shipped to the pool. Reads and
+    fully groups one file's packets into sessions, independent of every
+    other file — this is what lets separate tshark subprocesses + CSV
+    parsing for different files run on different CPU cores simultaneously."""
+    return path, group_by_session(read_packets(path))
+
+
+def load_sessions(paths, progress_callback=None, max_workers=None):
+    """Reads and session-groups one or more capture files.
+
+    For >1 file, files are processed in parallel worker processes (each
+    spawns its own tshark subprocess and does its own CPU-bound parsing),
+    which is what actually uses multiple cores — a single Python process
+    handing off to tshark one file at a time leaves the rest of the
+    machine idle. progress_callback, if given, is called once per
+    completed file as progress_callback(completed_count, total_files, path)
+    — file-level granularity rather than per-packet, since streaming
+    per-packet counts out of separate worker processes needs extra
+    machinery (a multiprocessing Queue/Manager) for little practical
+    benefit once you're processing hundreds of files.
+
+    max_workers defaults to min(number of files, CPU count). Tune this
+    down (e.g. os.cpu_count() // 2) if large captures make disk I/O or
+    memory the bottleneck before CPU does, or if running many concurrent
+    tshark instances thrashes on your machine.
+    """
     if isinstance(paths, str):
         paths = [paths]
 
     merged_sessions = defaultdict(list)
+    total_files = len(paths)
 
-    for path in paths:
-        def file_progress(count, _path=path):
-            progress_callback(count, _path)
+    if total_files == 0:
+        return merged_sessions
 
-        file_sessions = group_by_session(
-            read_packets(path, progress_callback=file_progress if progress_callback else None)
-        )
-        for session_id, packets in file_sessions.items():
-            merged_sessions[session_id].extend(packets)
+    max_workers = max_workers or min(total_files, os.cpu_count() or 4)
+    completed = 0
+
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_read_one_file, path): path for path in paths}
+
+        for future in as_completed(futures):
+            path = futures[future]
+            _, file_sessions = future.result()
+
+            for session_id, packets in file_sessions.items():
+                merged_sessions[session_id].extend(packets)
+
+            completed += 1
+            if progress_callback:
+                progress_callback(completed, total_files, path)
 
     return merged_sessions
 

@@ -21,32 +21,22 @@ REQUEST_TYPE_ALIASES = {
 }
 
 PROGRESS_BAR_WIDTH = 30
-PROGRESS_SMOOTHING_K = 2000  # higher = current file's in-progress fraction climbs more slowly
 
 
-def make_cli_progress_callback(total_files):
-    """Overall progress bar across ALL uploaded files, not just the current one.
-    Progress is driven mainly by how many files are fully done; the file
-    currently being read contributes a smoothed partial fraction so the bar
-    keeps moving even mid-file, without needing a known packet total."""
-    state = {"file_order": [], "current_path": None}
+def make_cli_progress_callback():
+    """Overall progress bar across ALL files. Files are now read in parallel
+    worker processes (see tool_core.load_sessions), so progress is reported
+    per completed file rather than per packet within the current file —
+    there's no single "current file" once several are being read at once."""
 
-    def progress_cb(count, path):
-        if path != state["current_path"]:
-            if path not in state["file_order"]:
-                state["file_order"].append(path)
-            state["current_path"] = path
-
-        completed_files = len(state["file_order"]) - 1
-        frac_within_current = count / (count + PROGRESS_SMOOTHING_K)
-        overall = (completed_files + frac_within_current) / total_files
-        overall = min(overall, 0.999)  # reserve 100% for true completion
+    def progress_cb(completed, total, path):
+        overall = completed / total
 
         pos = int(overall * PROGRESS_BAR_WIDTH)
         bar = "#" * pos + "-" * (PROGRESS_BAR_WIDTH - pos)
         sys.stdout.write(
             f"\r[{bar}] {overall * 100:5.1f}%  "
-            f"file {completed_files + 1}/{total_files}: {os.path.basename(path)} ({count} packets)".ljust(120)
+            f"{completed}/{total} files done (just finished: {os.path.basename(path)})".ljust(120)
         )
         sys.stdout.flush()
 
@@ -109,13 +99,23 @@ def main():
             f"Default is {DEFAULT_RESULT_CODE_LIMIT}. Pass 0 for no limit."
         ),
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help=(
+            "Number of files to read in parallel (each spawns its own tshark "
+            "process). Defaults to min(number of files, CPU count). Lower this "
+            "if reading many large files at once thrashes your machine."
+        ),
+    )
 
     args = parser.parse_args()
 
     limit = None if args.limit == 0 else args.limit
 
-    progress_cb = make_cli_progress_callback(total_files=len(args.pcap))
-    sessions = load_sessions(args.pcap, progress_callback=progress_cb)
+    progress_cb = make_cli_progress_callback()
+    sessions = load_sessions(args.pcap, progress_callback=progress_cb, max_workers=args.workers)
     sys.stdout.write("\r" + " " * 120 + "\r")  # clear the progress line
     sys.stdout.flush()
 
