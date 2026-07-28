@@ -222,7 +222,6 @@ def read_packets(filename, progress_callback=None, tshark_path=None):
                 count += 1
 
                 if count % 1000 == 0:
-                    print(f"Processed {count} packets")
                     if progress_callback:
                         progress_callback(count)
 

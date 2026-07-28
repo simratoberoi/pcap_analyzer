@@ -1,3 +1,6 @@
+import os
+import sys
+
 import argparse
 
 from tool_core import (
@@ -9,13 +12,45 @@ from tool_core import (
 )
 
 REQUEST_TYPE_ALIASES = {
-    "CCR": "272",  
-    "STR": "275",  
-    "ASR": "274",  
-    "RAR": "258", 
-    "AA": "265",  
+    "CCR": "272",
+    "STR": "275",
+    "ASR": "274",
+    "RAR": "258",
+    "AA": "265",
     "SLR": "8388635",
 }
+
+PROGRESS_BAR_WIDTH = 30
+PROGRESS_SMOOTHING_K = 2000  # higher = current file's in-progress fraction climbs more slowly
+
+
+def make_cli_progress_callback(total_files):
+    """Overall progress bar across ALL uploaded files, not just the current one.
+    Progress is driven mainly by how many files are fully done; the file
+    currently being read contributes a smoothed partial fraction so the bar
+    keeps moving even mid-file, without needing a known packet total."""
+    state = {"file_order": [], "current_path": None}
+
+    def progress_cb(count, path):
+        if path != state["current_path"]:
+            if path not in state["file_order"]:
+                state["file_order"].append(path)
+            state["current_path"] = path
+
+        completed_files = len(state["file_order"]) - 1
+        frac_within_current = count / (count + PROGRESS_SMOOTHING_K)
+        overall = (completed_files + frac_within_current) / total_files
+        overall = min(overall, 0.999)  # reserve 100% for true completion
+
+        pos = int(overall * PROGRESS_BAR_WIDTH)
+        bar = "#" * pos + "-" * (PROGRESS_BAR_WIDTH - pos)
+        sys.stdout.write(
+            f"\r[{bar}] {overall * 100:5.1f}%  "
+            f"file {completed_files + 1}/{total_files}: {os.path.basename(path)} ({count} packets)".ljust(120)
+        )
+        sys.stdout.flush()
+
+    return progress_cb
 
 
 def build_filter_summary(args):
@@ -79,7 +114,10 @@ def main():
 
     limit = None if args.limit == 0 else args.limit
 
-    sessions = load_sessions(args.pcap)
+    progress_cb = make_cli_progress_callback(total_files=len(args.pcap))
+    sessions = load_sessions(args.pcap, progress_callback=progress_cb)
+    sys.stdout.write("\r" + " " * 120 + "\r")  # clear the progress line
+    sys.stdout.flush()
 
     if args.list_subscriptions:
         print(

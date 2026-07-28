@@ -348,13 +348,40 @@ if st.session_state.is_processing:
             temp_path_to_name[temp_path] = uploaded.name
 
         with st.status("Reading packets...", expanded=True) as status:
+            progress_bar = st.progress(0.0)
+            total_files = len(temp_paths)
+            progress_state = {"file_order": [], "current_path": None}
+            SMOOTHING_K = 2000
 
             def progress_cb(count, path):
+                if path != progress_state["current_path"]:
+                    if path not in progress_state["file_order"]:
+                        progress_state["file_order"].append(path)
+                    progress_state["current_path"] = path
+
+                completed_files = len(progress_state["file_order"]) - 1
+                frac_within_current = count / (count + SMOOTHING_K)
+                overall = (completed_files + frac_within_current) / total_files
+                overall = min(overall, 0.999)
+
                 name = temp_path_to_name.get(path, path)
-                status.update(label=f"{name}: Processed {count} packets")
+                progress_bar.progress(
+                    overall,
+                    text=f"File {completed_files + 1}/{total_files} — {name}: {count} packets",
+                )
 
             sessions = load_sessions(temp_paths, progress_callback=progress_cb)
 
+            progress_bar.progress(1.0, text="Done reading all files")
+            status.update(
+                label=f"Done reading — found {len(sessions)} session(s) across {len(temp_paths)} file(s)",
+                state="complete",
+                expanded=False,
+            )
+
+            sessions = load_sessions(temp_paths, progress_callback=progress_cb)
+
+            progress_bar.progress(1.0, text="Done reading all files")
             status.update(
                 label=f"Done reading — found {len(sessions)} session(s) across {len(temp_paths)} file(s)",
                 state="complete",
