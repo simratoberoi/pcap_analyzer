@@ -96,7 +96,7 @@ def main():
         help=(
             "Max number of matching Requests to return for a --ResultCode search "
             "(each matched Answer's corresponding Request is printed, not the whole session). "
-            f"Default is {DEFAULT_RESULT_CODE_LIMIT}. Pass 0 for no limit."
+            "Unlimited by default — pass a positive number to cap it."
         ),
     )
     parser.add_argument(

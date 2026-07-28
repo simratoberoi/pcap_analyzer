@@ -19,7 +19,7 @@ from diameter_utils import (
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
-DEFAULT_RESULT_CODE_LIMIT = 50
+DEFAULT_RESULT_CODE_LIMIT = None  # no cap by default — return every matching session/message
 
 COMMAND_FILTER_CHOICES = [
     {"code": "272", "label": "Credit-Control-Request/Answer", "note": "Request received by PCRF"},

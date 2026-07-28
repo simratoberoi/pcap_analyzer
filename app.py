@@ -7,7 +7,6 @@ import streamlit as st
 
 from tool_core import (
     COMMAND_FILTER_CHOICES,
-    DEFAULT_RESULT_CODE_LIMIT,
     build_output_text,
     build_subscription_ids_output,
     load_sessions,
@@ -234,7 +233,6 @@ if "output_text" not in st.session_state:
 uploaded_files = None
 filter_type = None
 filter_value = ""
-result_limit = DEFAULT_RESULT_CODE_LIMIT
 run_analysis = False
 
 input_col, _ = st.columns([1.2, 0.8], gap="large")
@@ -270,19 +268,6 @@ with input_col:
         st.caption("No value needed — this lists every Subscription ID found in the upload(s).")
 
     if filter_type == "Result Code":
-        result_limit = st.number_input(
-            "Max matched requests (0 = no limit)",
-            min_value=0,
-            value=DEFAULT_RESULT_CODE_LIMIT,
-            step=10,
-            help=(
-                "Result-code searches print each matching Answer's corresponding "
-                "Request only - not the whole session. Cap how many Requests are "
-                "returned, or set 0 for no cap."
-            ),
-            disabled=st.session_state.is_processing,
-        )
-
         st.markdown(
             "<div style='color:rgb(38,39,48);margin:0.6rem 0 0.3rem;font-weight:600;'>"
             "Filter by request type</div>",
@@ -404,8 +389,6 @@ if st.session_state.is_processing:
                 **filter_kwargs,
             )
 
-            limit = None if result_limit == 0 else result_limit
-
             command_filter = None
             filter_summary = f"{filter_type} = {value}"
             if filter_type == "Result Code":
@@ -427,7 +410,7 @@ if st.session_state.is_processing:
                 sessions,
                 selected_sessions,
                 result_code=result_code,
-                limit=limit,
+                limit=None,
                 filter_summary=filter_summary,
                 command_filter=command_filter,
             )
