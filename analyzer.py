@@ -7,7 +7,7 @@ from tool_core import (
     DEFAULT_RESULT_CODE_LIMIT,
     build_output_text,
     build_subscription_ids_output,
-    load_sessions,
+    load_session_index,
     resolve_selected_sessions,
 )
 
@@ -24,10 +24,6 @@ PROGRESS_BAR_WIDTH = 30
 
 
 def make_cli_progress_callback():
-    """Overall progress bar across ALL files. Files are now read in parallel
-    worker processes (see tool_core.load_sessions), so progress is reported
-    per completed file rather than per packet within the current file —
-    there's no single "current file" once several are being read at once."""
 
     def progress_cb(completed, total, path):
         overall = completed / total
@@ -41,6 +37,11 @@ def make_cli_progress_callback():
         sys.stdout.flush()
 
     return progress_cb
+
+
+def clear_progress_line():
+    sys.stdout.write("\r" + " " * 120 + "\r")
+    sys.stdout.flush()
 
 
 def build_filter_summary(args):
@@ -115,37 +116,41 @@ def main():
     limit = None if args.limit == 0 else args.limit
 
     progress_cb = make_cli_progress_callback()
-    sessions = load_sessions(args.pcap, progress_callback=progress_cb, max_workers=args.workers)
-    sys.stdout.write("\r" + " " * 120 + "\r")  # clear the progress line
-    sys.stdout.flush()
+
+    session_index = load_session_index(args.pcap, progress_callback=progress_cb, max_workers=args.workers)
+    clear_progress_line()
 
     if args.list_subscriptions:
         print(
             build_subscription_ids_output(
-                sessions,
+                session_index,
                 filter_summary=f"Files = {', '.join(args.pcap)}",
             )
         )
         return
 
     selected_sessions = resolve_selected_sessions(
-        sessions,
+        session_index,
         session=args.session,
         subscription=args.subscription,
         ipv4=args.ipv4,
         ipv6=args.ipv6,
     )
 
-    print(
-        build_output_text(
-            sessions,
-            selected_sessions,
-            result_code=args.ResultCode,
-            limit=limit,
-            filter_summary=build_filter_summary(args),
-            command_filter=REQUEST_TYPE_ALIASES.get(args.RequestType),
-        )
+    output_text = build_output_text(
+        args.pcap,
+        session_index,
+        selected_sessions,
+        result_code=args.ResultCode,
+        limit=limit,
+        filter_summary=build_filter_summary(args),
+        command_filter=REQUEST_TYPE_ALIASES.get(args.RequestType),
+        progress_callback=progress_cb,
+        max_workers=args.workers,
     )
+    clear_progress_line()
+
+    print(output_text)
 
 
 if __name__ == "__main__":

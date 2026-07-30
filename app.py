@@ -9,7 +9,7 @@ from tool_core import (
     COMMAND_FILTER_CHOICES,
     build_output_text,
     build_subscription_ids_output,
-    load_sessions,
+    load_session_index,
     resolve_selected_sessions,
 )
 
@@ -332,24 +332,21 @@ if st.session_state.is_processing:
             temp_paths.append(temp_path)
             temp_path_to_name[temp_path] = uploaded.name
 
-        with st.status("Reading packets...", expanded=True) as status:
+        with st.status("Indexing sessions...", expanded=True) as status:
             progress_bar = st.progress(0.0)
 
-            # Files are read in parallel worker processes now (see
-            # tool_core.load_sessions), so progress comes per completed
-            # file rather than per packet within a single "current" file.
-            def progress_cb(completed, total, path):
+            def index_progress_cb(completed, total, path):
                 name = temp_path_to_name.get(path, path)
                 progress_bar.progress(
                     completed / total,
-                    text=f"{completed}/{total} files done (just finished: {name})",
+                    text=f"{completed}/{total} files indexed (just finished: {name})",
                 )
 
-            sessions = load_sessions(temp_paths, progress_callback=progress_cb)
+            session_index = load_session_index(temp_paths, progress_callback=index_progress_cb)
 
-            progress_bar.progress(1.0, text="Done reading all files")
+            progress_bar.progress(1.0, text="Done indexing all files")
             status.update(
-                label=f"Done reading — found {len(sessions)} session(s) across {len(temp_paths)} file(s)",
+                label=f"Indexed {len(session_index)} session(s) across {len(temp_paths)} file(s)",
                 state="complete",
                 expanded=False,
             )
@@ -358,7 +355,7 @@ if st.session_state.is_processing:
             filter_summary = f"List Subscription IDs, Files = {', '.join(temp_path_to_name.values())}"
 
             st.session_state.output_text = build_subscription_ids_output(
-                sessions,
+                session_index,
                 filter_summary=filter_summary,
             )
 
@@ -385,7 +382,7 @@ if st.session_state.is_processing:
                 result_code = value
 
             selected_sessions = resolve_selected_sessions(
-                sessions,
+                session_index,
                 **filter_kwargs,
             )
 
@@ -406,14 +403,29 @@ if st.session_state.is_processing:
 
             filter_summary += f", Files = {', '.join(temp_path_to_name.values())}"
 
-            st.session_state.output_text = build_output_text(
-                sessions,
-                selected_sessions,
-                result_code=result_code,
-                limit=None,
-                filter_summary=filter_summary,
-                command_filter=command_filter,
-            )
+            with st.status("Analyzing matches...", expanded=True) as status2:
+                progress_bar2 = st.progress(0.0)
+
+                def match_progress_cb(completed, total, path):
+                    name = temp_path_to_name.get(path, path)
+                    progress_bar2.progress(
+                        completed / total,
+                        text=f"{completed}/{total} files scanned (just finished: {name})",
+                    )
+
+                st.session_state.output_text = build_output_text(
+                    temp_paths,
+                    session_index,
+                    selected_sessions,
+                    result_code=result_code,
+                    limit=None,
+                    filter_summary=filter_summary,
+                    command_filter=command_filter,
+                    progress_callback=match_progress_cb,
+                )
+
+                progress_bar2.progress(1.0, text="Done")
+                status2.update(label="Done analyzing", state="complete", expanded=False)
 
     except Exception as exc:
         st.session_state.output_text = ""

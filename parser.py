@@ -124,6 +124,17 @@ ALL_FIELDS = _dedupe(
     + DIAMETER_BANDWIDTH_FIELDS
 )
 
+INDEX_FIELDS = _dedupe(
+    [
+        "diameter.Session-Id",
+        "diameter.Framed-IP-Address",
+        "diameter.Framed-IP-Address.IPv4",
+        "diameter.Framed-IPv6-Prefix",
+        "diameter.Subscription-Id-Data",
+        "diameter.Subscription-Id-Type",
+    ]
+)
+
 
 def _first(value):
     if value is None or value == "":
@@ -131,48 +142,72 @@ def _first(value):
     return value.split("|")[0]
 
 
-def _first_of(row, *field_names):
-    for field_name in field_names:
-        value = _first(row.get(field_name))
-        if value:
-            return value
-    return None
+_MESSAGE_COUNT_ANCHOR_FIELDS = ("diameter.Session-Id", "diameter.cmd.code")
 
 
-def build_packet_dict(row):
+def _split_values(value):
+    if value is None or value == "":
+        return []
+    return value.split("|")
 
-    command = _first(row.get("diameter.cmd.code"))
-    request_flag = _first(row.get("diameter.flags.request"))
 
-    flags = extract_diameter_flags(row)
-    bandwidth = extract_bandwidth_fields(row)
+def _message_count(row):
+    counts = [
+        len(_split_values(row.get(field_name)))
+        for field_name in _MESSAGE_COUNT_ANCHOR_FIELDS
+        if field_name in row
+    ]
+    counts = [c for c in counts if c > 0]
+    return max(counts) if counts else 1
+
+
+def _at(value, index):
+    parts = _split_values(value)
+    if index >= len(parts):
+        return None
+    piece = parts[index]
+    return piece if piece != "" else None
+
+
+def _row_at(row, index):
+    return {field_name: _at(value, index) for field_name, value in row.items()}
+
+
+def build_packet_dict(row, index=0):
+    sub_row = _row_at(row, index)
+
+    command = sub_row.get("diameter.cmd.code")
+    request_flag = sub_row.get("diameter.flags.request")
+
+    flags = extract_diameter_flags(sub_row)
+    bandwidth = extract_bandwidth_fields(sub_row)
 
     src = row.get("ip.src") or row.get("ipv6.src") or None
     dst = row.get("ip.dst") or row.get("ipv6.dst") or None
 
     return {
-        "session": _first(row.get("diameter.Session-Id")),
+        "session": sub_row.get("diameter.Session-Id"),
         "subscription_id": _first(row.get("diameter.Subscription-Id-Data")),
         "subscription_type": _first(row.get("diameter.Subscription-Id-Type")),
-        "ipv4": _first_of(row, "diameter.Framed-IP-Address.IPv4", "diameter.Framed-IP-Address"),
-        "ipv6": _first(row.get("diameter.Framed-IPv6-Prefix")),
-        "request_type": _first(row.get("diameter.CC-Request-Type")),
-        "called_station_id": _first(row.get("diameter.Called-Station-Id")),
-        "charging_characteristics": _first(row.get("diameter.3GPP-Charging-Characteristics")),
-        "rat_type": _first(row.get("diameter.3GPP-RAT-Type")),
+        "ipv4": sub_row.get("diameter.Framed-IP-Address.IPv4") or sub_row.get("diameter.Framed-IP-Address"),
+        "ipv6": sub_row.get("diameter.Framed-IPv6-Prefix"),
+        "request_type": sub_row.get("diameter.CC-Request-Type"),
+        "called_station_id": sub_row.get("diameter.Called-Station-Id"),
+        "charging_characteristics": sub_row.get("diameter.3GPP-Charging-Characteristics"),
+        "rat_type": sub_row.get("diameter.3GPP-RAT-Type"),
         "command": command,
         "command_name": command_family(command),
         "message_type": message_type(command, request_flag),
         "request_flag": request_flag,
-        "application_id": _first(row.get("diameter.applicationId")),
-        "result_code": _first(row.get("diameter.Result-Code")),
-        "experimental_result_code": _first(row.get("diameter.Experimental-Result-Code")),
-        "origin_host": _first(row.get("diameter.Origin-Host")),
-        "origin_realm": _first(row.get("diameter.Origin-Realm")),
-        "destination_host": _first(row.get("diameter.Destination-Host")),
-        "destination_realm": _first(row.get("diameter.Destination-Realm")),
-        "hop_by_hop": _first(row.get("diameter.hopbyhopid")),
-        "end_to_end": _first(row.get("diameter.endtoendid")),
+        "application_id": sub_row.get("diameter.applicationId"),
+        "result_code": sub_row.get("diameter.Result-Code"),
+        "experimental_result_code": sub_row.get("diameter.Experimental-Result-Code"),
+        "origin_host": sub_row.get("diameter.Origin-Host"),
+        "origin_realm": sub_row.get("diameter.Origin-Realm"),
+        "destination_host": sub_row.get("diameter.Destination-Host"),
+        "destination_realm": sub_row.get("diameter.Destination-Realm"),
+        "hop_by_hop": sub_row.get("diameter.hopbyhopid"),
+        "end_to_end": sub_row.get("diameter.endtoendid"),
         "time": row.get("frame.time_epoch"),
         "src": src,
         "dst": dst,
@@ -183,17 +218,44 @@ def build_packet_dict(row):
     }
 
 
-def read_packets(filename, progress_callback=None, tshark_path=None):
+def build_packet_dicts(row):
+    return [build_packet_dict(row, index) for index in range(_message_count(row))]
+
+
+def build_index_dict(row, index=0):
+    sub_row = _row_at(row, index)
+    return {
+        "session": sub_row.get("diameter.Session-Id"),
+        "ipv4": sub_row.get("diameter.Framed-IP-Address.IPv4") or sub_row.get("diameter.Framed-IP-Address"),
+        "ipv6": sub_row.get("diameter.Framed-IPv6-Prefix"),
+        "subscription_id": _first(row.get("diameter.Subscription-Id-Data")),
+        "subscription_type": _first(row.get("diameter.Subscription-Id-Type")),
+    }
+
+
+def build_index_dicts(row):
+    return [build_index_dict(row, index) for index in range(_message_count(row))]
+
+
+def _session_display_filter(session_ids):
+    clauses = " or ".join(
+        'diameter.Session-Id=="{}"'.format(str(sid).replace('"', '\\"'))
+        for sid in session_ids
+    )
+    return f"diameter && ({clauses})"
+
+
+def _run_tshark_fields(filename, fields, display_filter, progress_callback=None, tshark_path=None):
     tshark_path = tshark_path or resolve_tshark_path()
 
     cmd = [
         tshark_path,
         "-n",
         "-r", filename,
-        "-Y", "diameter",
+        "-Y", display_filter,
         "-T", "fields",
     ]
-    for field in ALL_FIELDS:
+    for field in fields:
         cmd += ["-e", field]
     cmd += [
         "-E", "header=y",
@@ -225,8 +287,7 @@ def read_packets(filename, progress_callback=None, tshark_path=None):
                     if progress_callback:
                         progress_callback(count)
 
-                row = dict(zip(header, row_values))
-                yield build_packet_dict(row)
+                yield dict(zip(header, row_values))
 
         if progress_callback:
             progress_callback(count)
@@ -249,3 +310,17 @@ def read_packets(filename, progress_callback=None, tshark_path=None):
                 "(no diameter packets, or a field name in ALL_FIELDS is wrong "
                 "— check with `tshark -G fields | grep -i diameter`)"
             )
+
+
+def read_packets(filename, progress_callback=None, tshark_path=None, session_ids=None):
+    display_filter = "diameter"
+    if session_ids:
+        display_filter = _session_display_filter(session_ids)
+
+    for row in _run_tshark_fields(filename, ALL_FIELDS, display_filter, progress_callback, tshark_path):
+        yield from build_packet_dicts(row)
+
+
+def read_session_index_rows(filename, progress_callback=None, tshark_path=None):
+    for row in _run_tshark_fields(filename, INDEX_FIELDS, "diameter", progress_callback, tshark_path):
+        yield from build_index_dicts(row)

@@ -1,10 +1,12 @@
+
+
 import os
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 
 from manager import group_by_session
-from parser import read_packets
+from parser import read_packets, read_session_index_rows
 from diameter_utils import (
     command_family,
     is_request_flag_false,
@@ -19,7 +21,7 @@ from diameter_utils import (
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
-DEFAULT_RESULT_CODE_LIMIT = None  # no cap by default — return every matching session/message
+DEFAULT_RESULT_CODE_LIMIT = None
 
 COMMAND_FILTER_CHOICES = [
     {"code": "272", "label": "Credit-Control-Request/Answer", "note": "Request received by PCRF"},
@@ -46,98 +48,94 @@ def request_type_label(pkt):
     return mapping.get(request_type, request_type)
 
 
-def _read_one_file(path):
-    """Runs inside a worker process. Must be a top-level function (not a
-    closure/lambda) so it can be pickled and shipped to the pool. Reads and
-    fully groups one file's packets into sessions, independent of every
-    other file — this is what lets separate tshark subprocesses + CSV
-    parsing for different files run on different CPU cores simultaneously."""
-    return path, group_by_session(read_packets(path))
+def is_request_packet(pkt):
+    return is_request_flag_true(pkt.get("request_flag"))
 
 
-def load_sessions(paths, progress_callback=None, max_workers=None):
-    """Reads and session-groups one or more capture files.
+def is_answer_packet(pkt):
+    return is_request_flag_false(pkt.get("request_flag"))
 
-    For >1 file, files are processed in parallel worker processes (each
-    spawns its own tshark subprocess and does its own CPU-bound parsing),
-    which is what actually uses multiple cores — a single Python process
-    handing off to tshark one file at a time leaves the rest of the
-    machine idle. progress_callback, if given, is called once per
-    completed file as progress_callback(completed_count, total_files, path)
-    — file-level granularity rather than per-packet, since streaming
-    per-packet counts out of separate worker processes needs extra
-    machinery (a multiprocessing Queue/Manager) for little practical
-    benefit once you're processing hundreds of files.
 
-    max_workers defaults to min(number of files, CPU count). Tune this
-    down (e.g. os.cpu_count() // 2) if large captures make disk I/O or
-    memory the bottleneck before CPU does, or if running many concurrent
-    tshark instances thrashes on your machine.
-    """
+def _new_index_entry():
+    return {"ips": set(), "subscriptions": set(), "subscription_details": {}}
+
+
+def _index_from_rows(rows):
+    index = defaultdict(_new_index_entry)
+
+    for row in rows:
+        session_id = row.get("session")
+        if session_id is None:
+            continue
+        entry = index[session_id]
+
+        ipv4 = normalize_ip_value(row.get("ipv4"))
+        if ipv4:
+            entry["ips"].add(ipv4)
+
+        ipv6 = normalize_ip_value(row.get("ipv6"))
+        if ipv6:
+            entry["ips"].add(ipv6)
+
+        raw_sub = row.get("subscription_id")
+        normalized_sub = normalize_match_value(raw_sub)
+        if normalized_sub:
+            entry["subscriptions"].add(normalized_sub)
+            details = entry["subscription_details"].setdefault(
+                normalized_sub, {"value": normalize_text(raw_sub), "type": None}
+            )
+            if details["type"] is None and row.get("subscription_type") is not None:
+                details["type"] = row.get("subscription_type")
+
+    return index
+
+
+def _read_one_file_index(path):
+    return path, _index_from_rows(read_session_index_rows(path))
+
+
+def load_session_index(paths, progress_callback=None, max_workers=None):
     if isinstance(paths, str):
         paths = [paths]
 
-    merged_sessions = defaultdict(list)
+    merged_index = defaultdict(_new_index_entry)
     total_files = len(paths)
 
     if total_files == 0:
-        return merged_sessions
+        return merged_index
 
     max_workers = max_workers or min(total_files, os.cpu_count() or 4)
     completed = 0
 
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(_read_one_file, path): path for path in paths}
+        futures = {executor.submit(_read_one_file_index, path): path for path in paths}
 
         for future in as_completed(futures):
             path = futures[future]
-            _, file_sessions = future.result()
+            _, file_index = future.result()
 
-            for session_id, packets in file_sessions.items():
-                merged_sessions[session_id].extend(packets)
+            for session_id, entry in file_index.items():
+                merged_entry = merged_index[session_id]
+                merged_entry["ips"] |= entry["ips"]
+                merged_entry["subscriptions"] |= entry["subscriptions"]
+                for normalized_sub, details in entry["subscription_details"].items():
+                    existing = merged_entry["subscription_details"].setdefault(
+                        normalized_sub, {"value": details["value"], "type": None}
+                    )
+                    if existing["type"] is None and details["type"] is not None:
+                        existing["type"] = details["type"]
 
             completed += 1
             if progress_callback:
                 progress_callback(completed, total_files, path)
 
-    return merged_sessions
+    return merged_index
 
 
-def build_indexes(sessions):
-
-    session_ips = defaultdict(set)
-    session_subscriptions = defaultdict(set)
-
-    for session_id, packets in sessions.items():
-        for pkt in packets:
-            ipv4 = normalize_ip_value(pkt.get("ipv4"))
-            if ipv4:
-                session_ips[session_id].add(ipv4)
-
-            ipv6 = normalize_ip_value(pkt.get("ipv6"))
-            if ipv6:
-                session_ips[session_id].add(ipv6)
-
-            if pkt.get("subscription_id"):
-                normalized_subscription = normalize_match_value(pkt["subscription_id"])
-                if normalized_subscription:
-                    session_subscriptions[session_id].add(normalized_subscription)
-
-    return session_ips, session_subscriptions
-
-
-def resolve_selected_sessions(
-    sessions,
-    session=None,
-    subscription=None,
-    ipv4=None,
-    ipv6=None,
-):
+def resolve_selected_sessions(session_index, session=None, subscription=None, ipv4=None, ipv6=None):
 
     if not (session or subscription or ipv4 or ipv6):
         return None
-
-    session_ips, session_subscriptions = build_indexes(sessions)
 
     seed_sessions = set()
 
@@ -148,16 +146,16 @@ def resolve_selected_sessions(
         subscription = normalize_match_value(subscription)
         seed_sessions.update(
             session_id
-            for session_id, subscriptions in session_subscriptions.items()
-            if subscription in subscriptions
+            for session_id, entry in session_index.items()
+            if subscription in entry["subscriptions"]
         )
 
     if ipv4 or ipv6:
         target_ip = normalize_ip_value(ipv4 or ipv6)
         seed_sessions.update(
             session_id
-            for session_id, ips in session_ips.items()
-            if target_ip in ips
+            for session_id, entry in session_index.items()
+            if target_ip in entry["ips"]
         )
 
     selected_sessions = set(seed_sessions)
@@ -165,63 +163,46 @@ def resolve_selected_sessions(
     seed_ips = set()
     seed_subscriptions = set()
     for session_id in seed_sessions:
-        seed_ips |= session_ips.get(session_id, set())
-        seed_subscriptions |= session_subscriptions.get(session_id, set())
+        entry = session_index.get(session_id)
+        if entry:
+            seed_ips |= entry["ips"]
+            seed_subscriptions |= entry["subscriptions"]
 
     if seed_ips:
         selected_sessions.update(
             session_id
-            for session_id, ips in session_ips.items()
-            if ips & seed_ips
+            for session_id, entry in session_index.items()
+            if entry["ips"] & seed_ips
         )
 
     if seed_subscriptions:
         selected_sessions.update(
             session_id
-            for session_id, subscriptions in session_subscriptions.items()
-            if subscriptions & seed_subscriptions
+            for session_id, entry in session_index.items()
+            if entry["subscriptions"] & seed_subscriptions
         )
 
     return selected_sessions
 
 
-def collect_subscription_ids(sessions):
-    """Return a dict of {normalized_subscription_id: {value, type, sessions}}
-    covering every distinct subscription ID seen across all sessions."""
-
-    subscriptions = {}
-
-    for session_id, packets in sessions.items():
-        for pkt in packets:
-            raw_value = pkt.get("subscription_id")
-            normalized = normalize_match_value(raw_value)
-            if not normalized:
-                continue
-
-            entry = subscriptions.setdefault(
-                normalized,
-                {
-                    "value": normalize_text(raw_value),
-                    "type": pkt.get("subscription_type"),
-                    "sessions": set(),
-                },
-            )
-            entry["sessions"].add(session_id)
-            if entry["type"] is None and pkt.get("subscription_type") is not None:
-                entry["type"] = pkt.get("subscription_type")
-
-    return subscriptions
-
-
-def build_subscription_ids_output(sessions, filter_summary=None):
-    subscriptions = collect_subscription_ids(sessions)
-
-    output_lines = ["Reading packets...", "", f"Found {len(sessions)} sessions"]
+def build_subscription_ids_output(session_index, filter_summary=None):
+    output_lines = ["Reading packets...", "", f"Found {len(session_index)} sessions"]
 
     if filter_summary:
         output_lines.append(f"Filter: {filter_summary}")
 
     output_lines.append("")
+
+    subscriptions = {}
+    for session_id, entry in session_index.items():
+        for normalized_sub, details in entry["subscription_details"].items():
+            sub_entry = subscriptions.setdefault(
+                normalized_sub,
+                {"value": details["value"], "type": details["type"], "sessions": set()},
+            )
+            sub_entry["sessions"].add(session_id)
+            if sub_entry["type"] is None and details["type"] is not None:
+                sub_entry["type"] = details["type"]
 
     if not subscriptions:
         output_lines.append("No subscription IDs found.")
@@ -240,12 +221,127 @@ def build_subscription_ids_output(sessions, filter_summary=None):
     return "\n".join(output_lines)
 
 
-def is_request_packet(pkt):
-    return is_request_flag_true(pkt.get("request_flag"))
+def _read_one_file_full(path, session_ids=None):
+    return path, group_by_session(read_packets(path, session_ids=session_ids))
 
 
-def is_answer_packet(pkt):
-    return is_request_flag_false(pkt.get("request_flag"))
+def load_full_sessions(paths, session_ids=None, progress_callback=None, max_workers=None):
+    if isinstance(paths, str):
+        paths = [paths]
+
+    merged_sessions = defaultdict(list)
+    total_files = len(paths)
+
+    if total_files == 0:
+        return merged_sessions
+
+    max_workers = max_workers or min(total_files, os.cpu_count() or 4)
+    completed = 0
+
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(_read_one_file_full, path, session_ids): path
+            for path in paths
+        }
+
+        for future in as_completed(futures):
+            path = futures[future]
+            _, file_sessions = future.result()
+
+            for session_id, packets in file_sessions.items():
+                merged_sessions[session_id].extend(packets)
+
+            completed += 1
+            if progress_callback:
+                progress_callback(completed, total_files, path)
+
+    return merged_sessions
+
+
+def _read_one_file_full_list(path):
+    return path, list(read_packets(path))
+
+
+def _stream_result_code_matches(
+    paths,
+    result_code,
+    limit=None,
+    command_filter=None,
+    max_workers=None,
+    progress_callback=None,
+):
+    result_code = normalize_text(result_code)
+    command_filter = normalize_command_code(command_filter)
+
+    if isinstance(paths, str):
+        paths = [paths]
+
+    pending_requests = {}
+    matches = []
+    seen = set()
+    matched_count = 0
+    limit_reached = False
+
+    total_files = len(paths)
+    if total_files == 0:
+        return matches, {"matched_requests": 0, "limit_reached": False}
+
+    max_workers = max_workers or min(total_files, os.cpu_count() or 4)
+    completed = 0
+
+    def process_file_packets(packets):
+        nonlocal matched_count, limit_reached
+
+        for pkt in packets:
+            if limit is not None and matched_count >= limit:
+                limit_reached = True
+                return
+
+            key = (pkt.get("session"), str(pkt.get("command")), str(pkt.get("hop_by_hop")))
+
+            if is_request_packet(pkt):
+                pending_requests[key] = pkt
+                continue
+
+            if not is_answer_packet(pkt):
+                continue
+
+            packet_code = pkt.get("experimental_result_code") or pkt.get("result_code")
+            if not values_match(packet_code, result_code):
+                continue
+
+            request_pkt = pending_requests.pop(key, None)
+            if request_pkt is None:
+                continue
+
+            if command_filter and normalize_command_code(request_pkt.get("command")) != command_filter:
+                continue
+
+            unique = (request_pkt.get("session"), request_pkt.get("number"))
+            if unique in seen:
+                continue
+
+            seen.add(unique)
+            matched_count += 1
+            matches.append(request_pkt)
+
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_read_one_file_full_list, path): path for path in paths}
+
+        for future in as_completed(futures):
+            path = futures[future]
+            _, packets = future.result()
+
+            if not limit_reached:
+                process_file_packets(packets)
+
+            completed += 1
+            if progress_callback:
+                progress_callback(completed, total_files, path)
+
+    matches.sort(key=lambda pkt: int(pkt["number"]))
+
+    return matches, {"matched_requests": matched_count, "limit_reached": limit_reached}
 
 
 def iter_result_code_packets(
@@ -448,49 +544,106 @@ def format_packet(pkt):
 
 
 def build_output_text(
-    sessions,
+    paths,
+    session_index,
     selected_sessions,
     result_code=None,
     limit=DEFAULT_RESULT_CODE_LIMIT,
     filter_summary=None,
     command_filter=None,
+    progress_callback=None,
+    max_workers=None,
 ):
-    output_lines = ["Reading packets...", "", f"Found {len(sessions)} sessions"]
+    total_sessions = len(session_index)
 
-    if filter_summary:
-        output_lines.append(f"Filter: {filter_summary}")
+    if selected_sessions is not None and not selected_sessions and not result_code:
+        output_lines = ["Reading packets...", "", f"Found {total_sessions} sessions"]
+        if filter_summary:
+            output_lines.append(f"Filter: {filter_summary}")
+        output_lines.append("")
+        output_lines.append("No matching packets found.")
+        return "\n".join(output_lines)
 
-    output_lines.append("")
+    if result_code:
+        stats = {}
 
-    found = False
-    match_count = 0
-    stats = {}
+        if selected_sessions is not None:
+            if not selected_sessions:
+                matches = []
+            else:
+                sessions = load_full_sessions(
+                    paths,
+                    session_ids=selected_sessions,
+                    progress_callback=progress_callback,
+                    max_workers=max_workers,
+                )
+                matches = list(
+                    iter_result_code_packets(
+                        sessions,
+                        selected_sessions,
+                        result_code=result_code,
+                        limit=limit,
+                        command_filter=command_filter,
+                        stats=stats,
+                    )
+                )
+        else:
+            matches, stats = _stream_result_code_matches(
+                paths,
+                result_code,
+                limit=limit,
+                command_filter=command_filter,
+                max_workers=max_workers,
+                progress_callback=progress_callback,
+            )
 
-    for pkt in iter_matching_packets(
-        sessions,
-        selected_sessions,
-        result_code=result_code,
-        limit=limit,
-        command_filter=command_filter,
-        stats=stats,
-    ):
-        found = True
-        match_count += 1
-        output_lines.append(format_packet(pkt))
+        output_lines = ["Reading packets...", "", f"Found {total_sessions} sessions"]
+        if filter_summary:
+            output_lines.append(f"Filter: {filter_summary}")
+        output_lines.append("")
 
-    if result_code and stats.get("limit_reached"):
-        output_lines.append(
-            f"(Result stopped at limit={limit} matched requests. "
-            "Increase or disable the limit to see more.)"
+        if matches:
+            for pkt in matches:
+                output_lines.append(format_packet(pkt))
+        else:
+            output_lines.append("No matching packets found.")
+
+        if stats.get("limit_reached"):
+            output_lines.append(
+                f"(Result stopped at limit={limit} matched requests. "
+                "Increase or disable the limit to see more.)"
+            )
+
+        return "\n".join(output_lines)
+
+    if selected_sessions is not None:
+        sessions = load_full_sessions(
+            paths,
+            session_ids=selected_sessions,
+            progress_callback=progress_callback,
+            max_workers=max_workers,
         )
 
-    if not found:
-        if result_code:
+        output_lines = ["Reading packets...", "", f"Found {total_sessions} sessions"]
+        if filter_summary:
+            output_lines.append(f"Filter: {filter_summary}")
+        output_lines.append("")
+
+        found = False
+        for pkt in iter_matching_packets(sessions):
+            found = True
+            output_lines.append(format_packet(pkt))
+
+        if not found:
             output_lines.append("No matching packets found.")
-        elif selected_sessions is not None:
-            output_lines.append("No matching packets found.")
-        else:
-            output_lines.extend(["First 10 Sessions:", ""])
-            output_lines.extend(list(sessions.keys())[:10])
+
+        return "\n".join(output_lines)
+
+    output_lines = ["Reading packets...", "", f"Found {total_sessions} sessions"]
+    if filter_summary:
+        output_lines.append(f"Filter: {filter_summary}")
+    output_lines.append("")
+    output_lines.extend(["First 10 Sessions:", ""])
+    output_lines.extend(list(session_index.keys())[:10])
 
     return "\n".join(output_lines)

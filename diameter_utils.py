@@ -43,7 +43,6 @@ FLAG_LABELS = {
     "diameter.flags.T": "Potentially Retransmitted",
 }
 
-# Keys here must match parser.DIAMETER_BANDWIDTH_FIELDS.
 BANDWIDTH_FIELDS = {
     "diameter.Max-Requested-Bandwidth-UL": "Max-Requested-Bandwidth-UL",
     "diameter.Max-Requested-Bandwidth-DL": "Max-Requested-Bandwidth-DL",
@@ -150,8 +149,6 @@ def command_code_display(command_code):
 
 
 def extract_diameter_flags(row):
-    """row is a dict of {tshark field name: raw string value} for one packet,
-    as produced by parser.build_packet_dict's input row."""
 
     flags = {}
     for field_name, label in FLAG_LABELS.items():
