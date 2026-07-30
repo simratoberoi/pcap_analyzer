@@ -173,7 +173,23 @@ def _row_at(row, index):
     return {field_name: _at(value, index) for field_name, value in row.items()}
 
 
-def build_packet_dict(row, index=0):
+def _subscription_pairs(row):
+    """Return every Subscription-Id AVP on this row (a message can carry more
+    than one — e.g. IMSI + E164 for the same subscriber — and all of them
+    need to be captured, not just the first)."""
+    data_values = _split_values(row.get("diameter.Subscription-Id-Data"))
+    type_values = _split_values(row.get("diameter.Subscription-Id-Type"))
+
+    pairs = []
+    for idx, data in enumerate(data_values):
+        if not data:
+            continue
+        sub_type = type_values[idx] if idx < len(type_values) else None
+        pairs.append({"value": data, "type": sub_type})
+    return pairs
+
+
+def build_packet_dict(row, index=0, source_file=None):
     sub_row = _row_at(row, index)
 
     command = sub_row.get("diameter.cmd.code")
@@ -185,10 +201,16 @@ def build_packet_dict(row, index=0):
     src = row.get("ip.src") or row.get("ipv6.src") or None
     dst = row.get("ip.dst") or row.get("ipv6.dst") or None
 
+    subscription_ids = _subscription_pairs(row)
+
     return {
+        "file": source_file,
         "session": sub_row.get("diameter.Session-Id"),
-        "subscription_id": _first(row.get("diameter.Subscription-Id-Data")),
-        "subscription_type": _first(row.get("diameter.Subscription-Id-Type")),
+        "subscription_ids": subscription_ids,
+        # Kept for backward compatibility with any caller that only wants
+        # a single subscription id/type; prefer "subscription_ids" (plural).
+        "subscription_id": subscription_ids[0]["value"] if subscription_ids else None,
+        "subscription_type": subscription_ids[0]["type"] if subscription_ids else None,
         "ipv4": sub_row.get("diameter.Framed-IP-Address.IPv4") or sub_row.get("diameter.Framed-IP-Address"),
         "ipv6": sub_row.get("diameter.Framed-IPv6-Prefix"),
         "request_type": sub_row.get("diameter.CC-Request-Type"),
@@ -218,8 +240,8 @@ def build_packet_dict(row, index=0):
     }
 
 
-def build_packet_dicts(row):
-    return [build_packet_dict(row, index) for index in range(_message_count(row))]
+def build_packet_dicts(row, source_file=None):
+    return [build_packet_dict(row, index, source_file=source_file) for index in range(_message_count(row))]
 
 
 def build_index_dict(row, index=0):
@@ -228,8 +250,7 @@ def build_index_dict(row, index=0):
         "session": sub_row.get("diameter.Session-Id"),
         "ipv4": sub_row.get("diameter.Framed-IP-Address.IPv4") or sub_row.get("diameter.Framed-IP-Address"),
         "ipv6": sub_row.get("diameter.Framed-IPv6-Prefix"),
-        "subscription_id": _first(row.get("diameter.Subscription-Id-Data")),
-        "subscription_type": _first(row.get("diameter.Subscription-Id-Type")),
+        "subscription_ids": _subscription_pairs(row),
     }
 
 
@@ -312,13 +333,18 @@ def _run_tshark_fields(filename, fields, display_filter, progress_callback=None,
             )
 
 
-def read_packets(filename, progress_callback=None, tshark_path=None, session_ids=None):
+def read_packets(filename, progress_callback=None, tshark_path=None, session_ids=None, source_file=None):
     display_filter = "diameter"
     if session_ids:
         display_filter = _session_display_filter(session_ids)
 
+    # Caller can override with a friendlier display name (e.g. the original
+    # uploaded filename instead of a temp path); default to the basename of
+    # whatever file we're actually reading.
+    source_file = source_file or os.path.basename(filename)
+
     for row in _run_tshark_fields(filename, ALL_FIELDS, display_filter, progress_callback, tshark_path):
-        yield from build_packet_dicts(row)
+        yield from build_packet_dicts(row, source_file=source_file)
 
 
 def read_session_index_rows(filename, progress_callback=None, tshark_path=None):

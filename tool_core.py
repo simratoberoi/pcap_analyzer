@@ -1,5 +1,3 @@
-
-
 import os
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -77,15 +75,17 @@ def _index_from_rows(rows):
         if ipv6:
             entry["ips"].add(ipv6)
 
-        raw_sub = row.get("subscription_id")
-        normalized_sub = normalize_match_value(raw_sub)
-        if normalized_sub:
+        for sub in row.get("subscription_ids") or []:
+            raw_sub = sub.get("value")
+            normalized_sub = normalize_match_value(raw_sub)
+            if not normalized_sub:
+                continue
             entry["subscriptions"].add(normalized_sub)
             details = entry["subscription_details"].setdefault(
                 normalized_sub, {"value": normalize_text(raw_sub), "type": None}
             )
-            if details["type"] is None and row.get("subscription_type") is not None:
-                details["type"] = row.get("subscription_type")
+            if details["type"] is None and sub.get("type") is not None:
+                details["type"] = sub.get("type")
 
     return index
 
@@ -221,11 +221,11 @@ def build_subscription_ids_output(session_index, filter_summary=None):
     return "\n".join(output_lines)
 
 
-def _read_one_file_full(path, session_ids=None):
-    return path, group_by_session(read_packets(path, session_ids=session_ids))
+def _read_one_file_full(path, session_ids=None, source_file=None):
+    return path, group_by_session(read_packets(path, session_ids=session_ids, source_file=source_file))
 
 
-def load_full_sessions(paths, session_ids=None, progress_callback=None, max_workers=None):
+def load_full_sessions(paths, session_ids=None, progress_callback=None, max_workers=None, file_names=None):
     if isinstance(paths, str):
         paths = [paths]
 
@@ -240,7 +240,9 @@ def load_full_sessions(paths, session_ids=None, progress_callback=None, max_work
 
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = {
-            executor.submit(_read_one_file_full, path, session_ids): path
+            executor.submit(
+                _read_one_file_full, path, session_ids, (file_names or {}).get(path)
+            ): path
             for path in paths
         }
 
@@ -258,8 +260,8 @@ def load_full_sessions(paths, session_ids=None, progress_callback=None, max_work
     return merged_sessions
 
 
-def _read_one_file_full_list(path):
-    return path, list(read_packets(path))
+def _read_one_file_full_list(path, source_file=None):
+    return path, list(read_packets(path, source_file=source_file))
 
 
 def _stream_result_code_matches(
@@ -269,6 +271,7 @@ def _stream_result_code_matches(
     command_filter=None,
     max_workers=None,
     progress_callback=None,
+    file_names=None,
 ):
     result_code = normalize_text(result_code)
     command_filter = normalize_command_code(command_filter)
@@ -326,7 +329,10 @@ def _stream_result_code_matches(
             matches.append(request_pkt)
 
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(_read_one_file_full_list, path): path for path in paths}
+        futures = {
+            executor.submit(_read_one_file_full_list, path, (file_names or {}).get(path)): path
+            for path in paths
+        }
 
         for future in as_completed(futures):
             path = futures[future]
@@ -494,13 +500,23 @@ def format_packet(pkt):
             continue
         bandwidth_lines.append(f"{field_label:<18} : {field_value}")
 
+    subscription_ids = pkt.get("subscription_ids") or []
+    subscription_lines = []
+    if subscription_ids:
+        for sub in subscription_ids:
+            type_label = sub.get("type") if sub.get("type") is not None else "Unknown"
+            subscription_lines.append(f"Subscription ID    : {sub.get('value')} (Type: {type_label})")
+    else:
+        subscription_lines.append(f"Subscription ID    : {pkt.get('subscription_id')}")
+        subscription_lines.append(f"Subscription Type  : {pkt.get('subscription_type')}")
+
     lines = [
         "=" * 80,
+        f"File               : {pkt.get('file')}",
         f"Packet Number      : {pkt['number']}",
         f"Timestamp          : {format_timestamp(pkt['time'])}",
         f"Session ID         : {pkt['session']}",
-        f"Subscription ID    : {pkt['subscription_id']}",
-        f"Subscription Type  : {pkt['subscription_type']}",
+        *subscription_lines,
         f"IPv4 Address       : {pkt['ipv4']}",
         f"IPv6 Address       : {pkt['ipv6']}",
         f"Request Type       : {request_type_label(pkt)}",
@@ -553,6 +569,7 @@ def build_output_text(
     command_filter=None,
     progress_callback=None,
     max_workers=None,
+    file_names=None,
 ):
     total_sessions = len(session_index)
 
@@ -576,6 +593,7 @@ def build_output_text(
                     session_ids=selected_sessions,
                     progress_callback=progress_callback,
                     max_workers=max_workers,
+                    file_names=file_names,
                 )
                 matches = list(
                     iter_result_code_packets(
@@ -595,6 +613,7 @@ def build_output_text(
                 command_filter=command_filter,
                 max_workers=max_workers,
                 progress_callback=progress_callback,
+                file_names=file_names,
             )
 
         output_lines = ["Reading packets...", "", f"Found {total_sessions} sessions"]
@@ -622,6 +641,7 @@ def build_output_text(
             session_ids=selected_sessions,
             progress_callback=progress_callback,
             max_workers=max_workers,
+            file_names=file_names,
         )
 
         output_lines = ["Reading packets...", "", f"Found {total_sessions} sessions"]

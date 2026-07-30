@@ -422,6 +422,7 @@ if st.session_state.is_processing:
                     filter_summary=filter_summary,
                     command_filter=command_filter,
                     progress_callback=match_progress_cb,
+                    file_names=temp_path_to_name,
                 )
 
                 progress_bar2.progress(1.0, text="Done")
