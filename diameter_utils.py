@@ -1,4 +1,23 @@
 import re
+from functools import lru_cache
+from typing import NamedTuple, Optional
+
+
+class SubscriptionId(NamedTuple):
+    """Lightweight stand-in for the old {"value": ..., "type": ...} dict.
+
+    A NamedTuple has no per-instance __dict__, so a large batch of these
+    (one or more per packet, across millions of packets) costs a fraction
+    of what an equivalent list of small dicts costs. `.get()` is provided
+    so existing call sites written for dict-like access (`sub.get("value")`)
+    keep working unchanged.
+    """
+
+    value: str
+    type: Optional[str] = None
+
+    def get(self, key, default=None):
+        return getattr(self, key, default)
 
 
 COMMAND_METADATA = {
@@ -111,6 +130,13 @@ def normalize_command_code(value):
     return command_code
 
 
+# These are derived from just a command code (and occasionally a request
+# flag), so the same handful of inputs repeats across every packet in a
+# capture. @lru_cache means we compute the family/label string once per
+# distinct input and hand back the *same* cached string object on every
+# subsequent packet, instead of re-deriving (and re-allocating) it up to
+# millions of times.
+@lru_cache(maxsize=None)
 def command_family(command_code):
     command_code = normalize_command_code(command_code)
     if not command_code:
@@ -119,6 +145,7 @@ def command_family(command_code):
     return COMMAND_METADATA.get(command_code, {}).get("family", f"Command-{command_code}")
 
 
+@lru_cache(maxsize=None)
 def message_type(command_code, request_flag):
     command_code = normalize_command_code(command_code)
     if not command_code:
@@ -136,6 +163,7 @@ def message_type(command_code, request_flag):
     return metadata["request"]
 
 
+@lru_cache(maxsize=None)
 def command_code_display(command_code):
     command_code = normalize_command_code(command_code)
     if not command_code:
@@ -148,29 +176,31 @@ def command_code_display(command_code):
     return f"{command_code} ({family})"
 
 
-def extract_diameter_flags(row):
-
+# NOTE: these used to take the whole tshark `row` dict and build a small
+# dict of *every* packet's flags/bandwidth up front, even when a given
+# search never displays them. Packet now stores only the raw scalar
+# fields (request_flag, proxyable, error_flag, ..., bandwidth_ul/dl) and
+# calls these to assemble the display dict lazily, only when a packet is
+# actually being formatted for output.
+def build_flags_dict(request_flag=None, proxyable=None, error=None, retransmitted=None):
     flags = {}
-    for field_name, label in FLAG_LABELS.items():
-        value = row.get(field_name)
-        if value is None or value == "":
-            continue
-
-        flags[label] = value
-
+    if request_flag not in (None, ""):
+        flags[FLAG_LABELS["diameter.flags.request"]] = request_flag
+    if proxyable not in (None, ""):
+        flags[FLAG_LABELS["diameter.flags.proxyable"]] = proxyable
+    if error not in (None, ""):
+        flags[FLAG_LABELS["diameter.flags.error"]] = error
+    if retransmitted not in (None, ""):
+        flags[FLAG_LABELS["diameter.flags.T"]] = retransmitted
     return flags
 
 
-def extract_bandwidth_fields(row):
-
+def build_bandwidth_dict(max_ul=None, max_dl=None):
     bandwidth_fields = {}
-    for field_name, label in BANDWIDTH_FIELDS.items():
-        value = row.get(field_name)
-        if value is None or value == "":
-            continue
-
-        bandwidth_fields[label] = value
-
+    if max_ul not in (None, ""):
+        bandwidth_fields["Max-Requested-Bandwidth-UL"] = max_ul
+    if max_dl not in (None, ""):
+        bandwidth_fields["Max-Requested-Bandwidth-DL"] = max_dl
     return bandwidth_fields
 
 

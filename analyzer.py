@@ -4,9 +4,10 @@ import sys
 import argparse
 
 from tool_core import (
+    DEFAULT_CACHE_DIR,
     DEFAULT_RESULT_CODE_LIMIT,
-    build_output_text,
     build_subscription_ids_output,
+    iter_output_lines,
     load_session_index,
     resolve_selected_sessions,
 )
@@ -110,47 +111,81 @@ def main():
             "if reading many large files at once thrashes your machine."
         ),
     )
+    parser.add_argument(
+        "--cache-dir",
+        default=DEFAULT_CACHE_DIR,
+        help=(
+            "Directory used to cache the lightweight session index for each "
+            f"file, keyed by content hash (default: {DEFAULT_CACHE_DIR}). "
+            "Re-running a different filter against the same file(s) reuses "
+            "the cached index instead of re-parsing with tshark."
+        ),
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help=(
+            "Disable the session-index cache and always re-parse with tshark. "
+            "Also skips the per-file content hash entirely (a full extra read "
+            "of each file) since a one-shot run has no cache entry to reuse — "
+            "worth using for a large one-time batch over files you won't "
+            "re-analyze."
+        ),
+    )
 
     args = parser.parse_args()
 
     limit = None if args.limit == 0 else args.limit
+    cache_dir = None if args.no_cache else args.cache_dir
 
     progress_cb = make_cli_progress_callback()
 
-    session_index = load_session_index(args.pcap, progress_callback=progress_cb, max_workers=args.workers)
-    clear_progress_line()
+    with load_session_index(
+        args.pcap, progress_callback=progress_cb, max_workers=args.workers, cache_dir=cache_dir
+    ) as session_index:
+        clear_progress_line()
 
-    if args.list_subscriptions:
-        print(
-            build_subscription_ids_output(
-                session_index,
-                filter_summary=f"Files = {', '.join(args.pcap)}",
+        if args.list_subscriptions:
+            print(
+                build_subscription_ids_output(
+                    session_index,
+                    filter_summary=f"Files = {', '.join(args.pcap)}",
+                )
             )
+            return
+
+        selected_sessions = resolve_selected_sessions(
+            session_index,
+            session=args.session,
+            subscription=args.subscription,
+            ipv4=args.ipv4,
+            ipv6=args.ipv6,
         )
-        return
 
-    selected_sessions = resolve_selected_sessions(
-        session_index,
-        session=args.session,
-        subscription=args.subscription,
-        ipv4=args.ipv4,
-        ipv6=args.ipv6,
-    )
+        # Stream output line-by-line (and packet-block-by-block) instead of
+        # building the whole rendered text in memory first. Matters once a
+        # run's matched output itself gets into the hundreds of MB (large
+        # corpora / broad filters) — the old build_output_text() approach
+        # held one giant joined string in RAM before printing any of it.
+        first_chunk = True
+        for chunk in iter_output_lines(
+            args.pcap,
+            session_index,
+            selected_sessions,
+            result_code=args.ResultCode,
+            limit=limit,
+            filter_summary=build_filter_summary(args),
+            command_filter=REQUEST_TYPE_ALIASES.get(args.RequestType),
+            progress_callback=progress_cb,
+            max_workers=args.workers,
+        ):
+            if first_chunk:
+                clear_progress_line()
+                first_chunk = False
+            print(chunk)
 
-    output_text = build_output_text(
-        args.pcap,
-        session_index,
-        selected_sessions,
-        result_code=args.ResultCode,
-        limit=limit,
-        filter_summary=build_filter_summary(args),
-        command_filter=REQUEST_TYPE_ALIASES.get(args.RequestType),
-        progress_callback=progress_cb,
-        max_workers=args.workers,
-    )
-    clear_progress_line()
-
-    print(output_text)
+        if first_chunk:
+            clear_progress_line()
 
 
 if __name__ == "__main__":

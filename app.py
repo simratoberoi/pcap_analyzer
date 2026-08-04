@@ -7,6 +7,7 @@ import streamlit as st
 
 from tool_core import (
     COMMAND_FILTER_CHOICES,
+    DEFAULT_CACHE_DIR,
     build_output_text,
     build_subscription_ids_output,
     load_session_index,
@@ -322,6 +323,7 @@ if run_analysis and not st.session_state.is_processing:
 if st.session_state.is_processing:
     temp_paths = []
     temp_path_to_name = {}
+    session_index = None
 
     try:
         for uploaded in uploaded_files:
@@ -342,7 +344,13 @@ if st.session_state.is_processing:
                     text=f"{completed}/{total} files indexed (just finished: {name})",
                 )
 
-            session_index = load_session_index(temp_paths, progress_callback=index_progress_cb)
+            # cache_dir defaults to DEFAULT_CACHE_DIR (content-hash keyed), so
+            # trying several filters against the same upload(s) in one
+            # session — or re-uploading the same file later — reuses the
+            # index instead of re-running tshark over the whole file again.
+            session_index = load_session_index(
+                temp_paths, progress_callback=index_progress_cb, cache_dir=DEFAULT_CACHE_DIR
+            )
 
             progress_bar.progress(1.0, text="Done indexing all files")
             status.update(
@@ -436,6 +444,8 @@ if st.session_state.is_processing:
         for temp_path in temp_paths:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
+        if session_index is not None:
+            session_index.close()
         st.session_state.is_processing = False
 
     st.rerun()
