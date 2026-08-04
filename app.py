@@ -344,12 +344,11 @@ if st.session_state.is_processing:
                     text=f"{completed}/{total} files indexed (just finished: {name})",
                 )
 
-            # cache_dir defaults to DEFAULT_CACHE_DIR (content-hash keyed), so
-            # trying several filters against the same upload(s) in one
-            # session — or re-uploading the same file later — reuses the
-            # index instead of re-running tshark over the whole file again.
             session_index = load_session_index(
-                temp_paths, progress_callback=index_progress_cb, cache_dir=DEFAULT_CACHE_DIR
+                temp_paths,
+                progress_callback=index_progress_cb,
+                cache_dir=DEFAULT_CACHE_DIR,
+                file_names=temp_path_to_name,
             )
 
             progress_bar.progress(1.0, text="Done indexing all files")

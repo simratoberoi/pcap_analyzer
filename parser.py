@@ -133,6 +133,10 @@ INDEX_FIELDS = _dedupe(
         "diameter.Framed-IPv6-Prefix",
         "diameter.Subscription-Id-Data",
         "diameter.Subscription-Id-Type",
+        # Not used for filtering — carried along so the index build can
+        # derive each file's earliest packet time, which is what the
+        # merged run DB uses to order multiple pcaps chronologically.
+        "frame.time_epoch",
     ]
 )
 
@@ -327,13 +331,14 @@ class Packet:
 
 class IndexRow:
 
-    __slots__ = ("session", "ipv4", "ipv6", "subscription_ids")
+    __slots__ = ("session", "ipv4", "ipv6", "subscription_ids", "time")
 
-    def __init__(self, session=None, ipv4=None, ipv6=None, subscription_ids=()):
+    def __init__(self, session=None, ipv4=None, ipv6=None, subscription_ids=(), time=None):
         self.session = session
         self.ipv4 = ipv4
         self.ipv6 = ipv6
         self.subscription_ids = subscription_ids
+        self.time = time
 
     def __getitem__(self, key):
         return getattr(self, key)
@@ -396,6 +401,7 @@ def build_index_row(row, index=0):
         ipv4=sub_row.get("diameter.Framed-IP-Address.IPv4") or sub_row.get("diameter.Framed-IP-Address"),
         ipv6=sub_row.get("diameter.Framed-IPv6-Prefix"),
         subscription_ids=_subscription_pairs(row),
+        time=sub_row.get("frame.time_epoch"),
     )
 
 

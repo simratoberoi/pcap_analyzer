@@ -47,9 +47,21 @@ CREATE TABLE IF NOT EXISTS session_subs (
     sub_type TEXT,
     UNIQUE(session_id, sub_norm)
 );
+CREATE TABLE IF NOT EXISTS file_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
 """
 
-_RUN_TABLES_SCHEMA = _FILE_INDEX_SCHEMA
+_RUN_TABLES_SCHEMA = (
+    _FILE_INDEX_SCHEMA
+    + """
+CREATE TABLE IF NOT EXISTS file_times (
+    file_name TEXT PRIMARY KEY,
+    min_time REAL
+);
+"""
+)
 
 _RUN_SECONDARY_INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_session_ips_ip ON session_ips(ip);
@@ -118,6 +130,7 @@ def _build_file_index_db(path, db_path):
     conn = _open_file_db(tmp_path)
     try:
         session_batch, ip_batch, sub_batch = [], [], []
+        min_time = None
 
         def flush():
             if session_batch:
@@ -148,6 +161,15 @@ def _build_file_index_db(path, db_path):
 
             session_batch.append((session_id,))
 
+            row_time = row.get("time")
+            if row_time not in (None, ""):
+                try:
+                    row_time = float(row_time)
+                except (TypeError, ValueError):
+                    row_time = None
+                if row_time is not None and (min_time is None or row_time < min_time):
+                    min_time = row_time
+
             ipv4 = normalize_ip_value(row.get("ipv4"))
             if ipv4:
                 ip_batch.append((session_id, ipv4))
@@ -171,6 +193,12 @@ def _build_file_index_db(path, db_path):
                 pending = 0
 
         flush()
+        if min_time is not None:
+            conn.execute(
+                "INSERT INTO file_meta(key, value) VALUES ('min_time', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (str(min_time),),
+            )
         conn.commit()
     finally:
         conn.close()
@@ -202,7 +230,7 @@ def _build_or_get_cached_file_db(path, cache_dir, skip_cache):
     return _build_file_index_db(path, db_path)
 
 
-def _merge_file_dbs_into(run_conn, file_db_paths):
+def _merge_file_dbs_into(run_conn, file_entries):
     """Loads every per-file DB's raw session_subs rows into a plain
     staging table (no lookups, no dedup — just accumulate), then resolves
     sub_type with a single GROUP BY pass at the very end. This replaces
@@ -214,9 +242,14 @@ def _merge_file_dbs_into(run_conn, file_db_paths):
     sessions/session_ips dedup only ever needs a primary-key / unique-key
     check (no cross-row lookups), so those stay as simple INSERT OR
     IGNORE ... SELECT per file — that part was never the bottleneck.
+
+    file_entries is a list of (label, file_db_path) tuples, where label
+    is the same display name later attached to each Packet's `file`
+    field, so the file_times row keyed here can be looked up by that
+    same label when ordering output chronologically.
     """
-    
-    for i, file_db_path in enumerate(file_db_paths):
+
+    for i, (label, file_db_path) in enumerate(file_entries):
         alias = f"f{i}"
         run_conn.execute("ATTACH DATABASE ? AS " + alias, (file_db_path,))
         try:
@@ -232,8 +265,40 @@ def _merge_file_dbs_into(run_conn, file_db_paths):
                 f"INSERT INTO session_subs_staging(session_id, sub_norm, sub_value, sub_type) "
                 f"SELECT session_id, sub_norm, sub_value, sub_type FROM {alias}.session_subs"
             )
-            run_conn.commit()
+
+            # file_meta may be missing on a cache entry built by an older
+            # version of this tool (before per-file timing was tracked) -
+            # treat that the same as "no timestamp available" rather than
+            # failing the whole run; such a file just sorts last.
+            min_time = None
+            try:
+                min_time_row = run_conn.execute(
+                    f"SELECT value FROM {alias}.file_meta WHERE key = 'min_time'"
+                ).fetchone()
+                if min_time_row and min_time_row[0] is not None:
+                    try:
+                        min_time = float(min_time_row[0])
+                    except (TypeError, ValueError):
+                        min_time = None
+            except sqlite3.OperationalError:
+                min_time = None
+
+            run_conn.execute(
+                "INSERT INTO file_times(file_name, min_time) VALUES (?, ?) "
+                "ON CONFLICT(file_name) DO UPDATE SET "
+                "min_time = MIN(COALESCE(file_times.min_time, excluded.min_time), "
+                "COALESCE(excluded.min_time, file_times.min_time))",
+                (label, min_time),
+            )
         finally:
+            # Commit (or roll back cleanly) before detaching no matter
+            # what happened above - an open transaction on the attached
+            # DB is what turns a failed step into "database is locked"
+            # on DETACH.
+            try:
+                run_conn.commit()
+            except sqlite3.OperationalError:
+                run_conn.rollback()
             run_conn.execute(f"DETACH DATABASE {alias}")
 
     
@@ -336,6 +401,18 @@ class SessionIndexStore:
 
         return selected_sessions
 
+    def file_rank_map(self):
+        """Maps each source file's display label to a chronological rank
+        (0 = earliest), derived from the earliest packet timestamp seen
+        in that file during indexing. Files with no recoverable
+        timestamp sort last, tie-broken alphabetically by label. Used as
+        the primary (level-1) sort key for output, with packet number as
+        the level-2 tiebreaker within a file."""
+        cur = self._conn.execute(
+            "SELECT file_name FROM file_times ORDER BY (min_time IS NULL), min_time, file_name"
+        )
+        return {row[0]: rank for rank, row in enumerate(cur)}
+
     def subscription_report(self):
         cur = self._conn.execute(
             """
@@ -374,7 +451,7 @@ class SessionIndexStore:
         self.close()
 
 
-def load_session_index(paths, progress_callback=None, max_workers=None, cache_dir=DEFAULT_CACHE_DIR):
+def load_session_index(paths, progress_callback=None, max_workers=None, cache_dir=DEFAULT_CACHE_DIR, file_names=None):
 
     if isinstance(paths, str):
         paths = [paths]
@@ -393,7 +470,10 @@ def load_session_index(paths, progress_callback=None, max_workers=None, cache_di
     skip_cache = cache_dir is None
     max_workers = max_workers or min(total_files, os.cpu_count() or 4)
     completed = 0
-    file_db_paths = []
+    # (label, db_path) pairs — label is the same display name later used
+    # as each Packet's `file` field, so file_times stays keyed consistently
+    # with whatever output ordering ultimately looks it up by.
+    file_entries = []
 
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = {
@@ -403,16 +483,17 @@ def load_session_index(paths, progress_callback=None, max_workers=None, cache_di
 
         for future in as_completed(futures):
             path = futures[future]
-            file_db_paths.append(future.result())
+            label = (file_names or {}).get(path) or os.path.basename(path)
+            file_entries.append((label, future.result()))
 
             completed += 1
             if progress_callback:
                 progress_callback(completed, total_files, path)
 
-    _merge_file_dbs_into(run_conn, file_db_paths)  
+    _merge_file_dbs_into(run_conn, file_entries)
 
     if skip_cache:
-        for db_path in file_db_paths:
+        for _, db_path in file_entries:
             try:
                 os.remove(db_path)
             except OSError:
@@ -479,6 +560,44 @@ def request_type_label(pkt):
     return mapping.get(request_type, request_type)
 
 
+def _infer_file_rank_map(packets):
+    """Fallback used when no SQLite-derived file_rank_map is available
+    (e.g. iter_matching_packets called standalone, outside the normal
+    load_session_index pipeline): derives file chronological order from
+    the earliest packet timestamp seen per file within the given packets
+    themselves."""
+    earliest = {}
+    for pkt in packets:
+        file_name = pkt.get("file")
+        try:
+            t = float(pkt.get("time"))
+        except (TypeError, ValueError):
+            continue
+        if file_name not in earliest or t < earliest[file_name]:
+            earliest[file_name] = t
+
+    ranked = sorted(earliest, key=lambda f: earliest[f])
+    return {f: i for i, f in enumerate(ranked)}
+
+
+def _chronological_sort_key(file_rank_map):
+    """Two-level sort key: pcap capture order first (via file_rank_map,
+    built from each file's earliest packet timestamp), then packet
+    number within that file. Packet numbers reset per file, so they're
+    only meaningful as a tiebreaker within the same file, never across
+    files."""
+
+    def key(pkt):
+        file_name = pkt.get("file")
+        try:
+            number = int(pkt.get("number") or 0)
+        except (TypeError, ValueError):
+            number = 0
+        return (file_rank_map.get(file_name, len(file_rank_map)), number)
+
+    return key
+
+
 def is_request_packet(pkt):
     return is_request_flag_true(pkt.get("request_flag"))
 
@@ -540,7 +659,18 @@ def _read_one_file_matches(path, session_ids, source_file=None):
     return path, matches
 
 
-def iter_full_session_matches_by_file(paths, session_ids, progress_callback=None, max_workers=None, file_names=None):
+def iter_full_session_matches_by_file(
+    paths, session_ids, progress_callback=None, max_workers=None, file_names=None, file_rank_map=None
+):
+    """Reads each file's matches in a separate worker (so no more than one
+    file's worth of matches is ever alive in this process at once), but
+    yields the finished per-file blocks in pcap chronological order
+    (level 1) rather than whichever order the workers happen to finish
+    in. All workers are still submitted up front and run concurrently —
+    only the order in which their results are consumed/yielded changes.
+    Within each file, _read_one_file_matches already sorts by packet
+    number (level 2).
+    """
 
     if isinstance(paths, str):
         paths = [paths]
@@ -549,20 +679,27 @@ def iter_full_session_matches_by_file(paths, session_ids, progress_callback=None
     if total_files == 0:
         return
 
+    if file_rank_map:
+        ordered_paths = sorted(
+            paths,
+            key=lambda p: file_rank_map.get((file_names or {}).get(p) or os.path.basename(p), len(file_rank_map)),
+        )
+    else:
+        ordered_paths = list(paths)
+
     max_workers = max_workers or min(total_files, os.cpu_count() or 4)
     completed = 0
 
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = {
-            executor.submit(
+            path: executor.submit(
                 _read_one_file_matches, path, session_ids, (file_names or {}).get(path)
-            ): path
-            for path in paths
+            )
+            for path in ordered_paths
         }
 
-        for future in as_completed(futures):
-            path = futures[future]
-            _, matches = future.result()
+        for path in ordered_paths:
+            _, matches = futures[path].result()
 
             yield path, matches
 
@@ -623,6 +760,7 @@ def _stream_result_code_matches(
     max_workers=None,
     progress_callback=None,
     file_names=None,
+    file_rank_map=None,
 ):
     result_code = normalize_text(result_code)
     command_filter = normalize_command_code(command_filter)
@@ -672,7 +810,7 @@ def _stream_result_code_matches(
             if progress_callback:
                 progress_callback(completed, total_files, path)
 
-    all_matches.sort(key=lambda pkt: pkt.number)
+    all_matches.sort(key=_chronological_sort_key(file_rank_map if file_rank_map is not None else _infer_file_rank_map(all_matches)))
 
     limit_reached = any_limit_reached
     if limit is not None and len(all_matches) > limit:
@@ -689,6 +827,7 @@ def iter_result_code_packets(
     limit=DEFAULT_RESULT_CODE_LIMIT,
     command_filter=None,
     stats=None,
+    file_rank_map=None,
 ):
 
     result_code = normalize_text(result_code)
@@ -759,7 +898,7 @@ def iter_result_code_packets(
         if limit is not None and matched_count >= limit:
             limit_reached = True
             break
-    matches.sort(key=lambda pkt: int(pkt["number"]))
+    matches.sort(key=_chronological_sort_key(file_rank_map if file_rank_map is not None else _infer_file_rank_map(matches)))
 
     for pkt in matches:
         yield pkt
@@ -776,6 +915,7 @@ def iter_matching_packets(
     limit=DEFAULT_RESULT_CODE_LIMIT,
     command_filter=None,
     stats=None,
+    file_rank_map=None,
 ):
     if result_code:
         yield from iter_result_code_packets(
@@ -785,6 +925,7 @@ def iter_matching_packets(
             limit=limit,
             command_filter=command_filter,
             stats=stats,
+            file_rank_map=file_rank_map,
         )
         return
 
@@ -797,7 +938,7 @@ def iter_matching_packets(
 
             matched_packets.append(pkt)
 
-    matched_packets.sort(key=lambda pkt: int(pkt["number"]))
+    matched_packets.sort(key=_chronological_sort_key(file_rank_map if file_rank_map is not None else _infer_file_rank_map(matched_packets)))
 
     yield from matched_packets
 
@@ -905,6 +1046,10 @@ def iter_output_lines(
 ):
 
     total_sessions = len(session_index)
+    # Pcap chronological order (level-1 sort key everywhere output is
+    # sorted below), derived once from the run's SQLite index rather than
+    # re-derived per code path.
+    file_rank_map = session_index.file_rank_map()
 
     if selected_sessions is not None and not selected_sessions and not result_code:
         yield "Reading packets..."
@@ -938,6 +1083,7 @@ def iter_output_lines(
                         limit=limit,
                         command_filter=command_filter,
                         stats=stats,
+                        file_rank_map=file_rank_map,
                     )
                 )
         else:
@@ -949,6 +1095,7 @@ def iter_output_lines(
                 max_workers=max_workers,
                 progress_callback=progress_callback,
                 file_names=file_names,
+                file_rank_map=file_rank_map,
             )
 
         yield "Reading packets..."
@@ -986,6 +1133,7 @@ def iter_output_lines(
             progress_callback=progress_callback,
             max_workers=max_workers,
             file_names=file_names,
+            file_rank_map=file_rank_map,
         ):
             for pkt in matches:
                 found = True
