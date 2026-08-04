@@ -12,10 +12,51 @@ files at once. Available both as a Streamlit web UI and a CLI.
 |--------------------|------------------------------------------------------------------|
 | `app.py`           | Streamlit web UI                                                |
 | `analyzer.py`      | Command-line entry point                                        |
-| `tool_core.py`     | Core filtering / session-resolution / output-formatting logic   |
+| `tool_core.py`     | Core filtering / session-resolution / output-formatting logic, plus the SQLite-backed session index and cache |
 | `parser.py`        | Reads packets from a capture by invoking `tshark` directly (subprocess) |
 | `diameter_utils.py`| Diameter AVP and command-code helpers                           |
 | `manager.py`       | Groups packets into sessions                                    |
+
+## How session indexing and caching work (RAM optimization)
+
+Every run first builds a lightweight **session index** - one row per
+session with just its Session-Id, IP(s), and Subscription-Id(s) - instead
+of holding every packet from every file in memory at once. This index is
+stored on disk in SQLite rather than in a Python dict/set, so indexing
+hundreds of files or tens of GB of captures doesn't grow the process's RAM
+with the size of the input:
+
+- Each file is indexed into its own small SQLite DB, named by a content
+  hash of the file. Re-running a different filter against the same
+  file(s) - or re-uploading the same file later in the web UI - reuses
+  that cached index instead of re-parsing with `tshark`.
+- Per-file DBs are merged into one per-run SQLite DB (`session_id`,
+  `session_ips`, `session_subs` tables, indexed on IP and Subscription-Id)
+  that filters resolve against with plain indexed SQL queries, so
+  resolving a filter never requires pulling the whole index into Python.
+- Only the (typically much smaller) matching session set, and later the
+  matching packets themselves, are ever materialized as Python objects -
+  full packet data for non-matching sessions is never read into memory.
+- The same per-run DB also records each file's earliest packet
+  timestamp, which the output uses to sort multiple pcaps in
+  chronological (capture) order - see below.
+- Cache files live under a temp directory (`DEFAULT_CACHE_DIR` in
+  `tool_core.py`, overridable via `--cache-dir` on the CLI) and are keyed
+  by content hash, so they're safe to leave in place and reuse across
+  runs; delete that directory any time to clear the cache.
+
+## Output ordering
+
+When more than one capture file is analyzed together, matched packets in
+the output are sorted at two levels:
+
+1. **Chronological order of the pcaps** - by each file's earliest packet
+   timestamp (from the session index), so results read in real capture
+   order regardless of upload/argument order or which file's `tshark`
+   process happens to finish first.
+2. **Packet number within that file** - packet numbers reset per file, so
+   they're only meaningful as a tiebreaker within the same file, never
+   across files.
 
 ## Prerequisites
 
@@ -92,7 +133,10 @@ python analyzer.py <capture1.pcap> [capture2.pcap ...] [options]
 | `--ipv6`         | Filter by Framed IPv6 address                                       |
 | `--ResultCode`   | Filter by Result Code                                                |
 | `--RequestType`  | Used with `--ResultCode`; one of `CCR`, `STR`, `ASR`, `RAR`, `AA`, `SLR` |
-| `--limit`        | Max matched requests for a `--ResultCode` search (default 50, `0` = no limit) |
+| `--limit`        | Max matched requests for a `--ResultCode` search (unlimited by default, pass a positive number to cap it) |
+| `--workers`      | Number of files to read in parallel (each spawns its own `tshark` process). Defaults to `min(number of files, CPU count)` |
+| `--cache-dir`    | Directory used to cache each file's SQLite session index, keyed by content hash (default: a `pcap_analyzer_index_cache` folder under your system temp dir). Re-running a different filter against the same file(s) reuses the cache instead of re-parsing with `tshark` |
+| `--no-cache`     | Disable the session-index cache and always re-parse with `tshark`. Also skips the per-file content hash (a full extra read of each file) - worth using for a large one-time batch over files you won't re-analyze |
 
 **Example:**
 
@@ -132,3 +176,15 @@ python analyzer.py capture.pcap --list-subscriptions
   your installed Streamlit version predates those features; upgrade with
   `pip install -U streamlit` (see `requirements.txt` for the minimum
   version).
+- **`ModuleNotFoundError: No module named 'sqlite3'`** - your Python
+  build was compiled without SQLite support (common on some minimal
+  Linux installs). Install your distro's SQLite dev package (e.g.
+  `libsqlite3-dev` on Debian/Ubuntu) and reinstall/rebuild Python; see
+  `requirements.txt` for details. No `pip install` fixes this, since
+  `sqlite3` is a standard-library module.
+- **Results look stale after re-analyzing a file you edited in place** -
+  the session-index cache is keyed by file content hash, so this
+  shouldn't normally happen; if it does, delete the cache directory
+  (default: a `pcap_analyzer_index_cache` folder under your system temp
+  dir, or whatever you passed to `--cache-dir`) or re-run with
+  `--no-cache`.

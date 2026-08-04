@@ -1,2 +1,9 @@
 # Web UI
 streamlit>=1.34
+
+# Session index caching (tool_core.py) uses the sqlite3 module from the
+# Python standard library - no separate package needed, just Python 3.9+
+# with a standard sqlite3 build (the default on macOS/Windows/Linux
+# installers; some minimal Linux Python builds omit it - if `import
+# sqlite3` fails, install your distro's e.g. `python3-sqlite` /
+# `libsqlite3-dev` package and reinstall/rebuild Python against it).
