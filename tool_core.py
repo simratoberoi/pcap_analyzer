@@ -346,18 +346,6 @@ class SessionIndexStore:
         cur = self._conn.execute("SELECT session_id FROM session_subs WHERE sub_norm = ?", (sub_norm,))
         return {row[0] for row in cur}
 
-    def _sessions_sharing_ips_of(self, session_id):
-        cur = self._conn.execute(
-            """
-            SELECT DISTINCT other.session_id
-            FROM session_ips AS mine
-            JOIN session_ips AS other ON other.ip = mine.ip
-            WHERE mine.session_id = ?
-            """,
-            (session_id,),
-        )
-        return {row[0] for row in cur}
-
     def _sessions_sharing_ips_of_any(self, session_ids):
         if not session_ids:
             return set()
@@ -386,7 +374,6 @@ class SessionIndexStore:
         if session:
             session_id = str(session).strip()
             selected_sessions.add(session_id)
-            selected_sessions |= self._sessions_sharing_ips_of(session_id)
 
         if subscription:
             normalized_sub = normalize_match_value(subscription)
