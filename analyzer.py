@@ -19,6 +19,7 @@ REQUEST_TYPE_ALIASES = {
     "RAR": "258",
     "AA": "265",
     "SLR": "8388635",
+    "SNR": "8388636",
 }
 
 PROGRESS_BAR_WIDTH = 30
@@ -59,6 +60,8 @@ def build_filter_summary(args):
         parts.append(f"Result Code = {args.ResultCode}")
         if args.RequestType:
             parts.append(f"Request Type = {args.RequestType}")
+    elif args.RequestType:
+        parts.append(f"Request Type = {args.RequestType}")
 
     return ", ".join(parts) if parts else None
 
@@ -81,14 +84,17 @@ def main():
         "--RequestType",
         choices=list(REQUEST_TYPE_ALIASES),
         help=(
-            "Only used together with --ResultCode. Further restricts matches to "
-            "answers whose corresponding request is of this command family: "
+            "Restricts output to this Diameter command family: "
             "CCR=Credit-Control-Request/Answer (received by PCRF), "
             "STR=Session-Termination-Request/Answer (sent as well as received by PCRF), "
             "ASR=Abort-Session-Request/Answer (sent by PCRF), "
             "RAR=Re-Auth-Request/Answer (sent by PCRF), "
             "AA=AA-Request/Answer (authentication-authorization exchange), "
-            "SLR=Spending-Limit-Request/Answer (Sy interface, OCS spending limit)."
+            "SLR=Spending-Limit-Request/Answer (Sy interface, OCS spending limit), "
+            "SNR=Spending-Status-Notification-Request/Answer (Sy interface, OCS spending status notification). "
+            "Used together with --ResultCode, it further restricts matches to answers "
+            "whose corresponding request is of this family. Used on its own (no "
+            "--ResultCode), it dumps every Request and Answer of this family instead."
         ),
     )
     parser.add_argument(
@@ -162,11 +168,6 @@ def main():
             ipv6=args.ipv6,
         )
 
-        # Stream output line-by-line (and packet-block-by-block) instead of
-        # building the whole rendered text in memory first. Matters once a
-        # run's matched output itself gets into the hundreds of MB (large
-        # corpora / broad filters) — the old build_output_text() approach
-        # held one giant joined string in RAM before printing any of it.
         first_chunk = True
         for chunk in iter_output_lines(
             args.pcap,

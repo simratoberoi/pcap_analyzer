@@ -266,10 +266,6 @@ def _merge_file_dbs_into(run_conn, file_entries):
                 f"SELECT session_id, sub_norm, sub_value, sub_type FROM {alias}.session_subs"
             )
 
-            # file_meta may be missing on a cache entry built by an older
-            # version of this tool (before per-file timing was tracked) -
-            # treat that the same as "no timestamp available" rather than
-            # failing the whole run; such a file just sorts last.
             min_time = None
             try:
                 min_time_row = run_conn.execute(
@@ -291,10 +287,7 @@ def _merge_file_dbs_into(run_conn, file_entries):
                 (label, min_time),
             )
         finally:
-            # Commit (or roll back cleanly) before detaching no matter
-            # what happened above - an open transaction on the attached
-            # DB is what turns a failed step into "database is locked"
-            # on DETACH.
+
             try:
                 run_conn.commit()
             except sqlite3.OperationalError:
@@ -457,9 +450,6 @@ def load_session_index(paths, progress_callback=None, max_workers=None, cache_di
     skip_cache = cache_dir is None
     max_workers = max_workers or min(total_files, os.cpu_count() or 4)
     completed = 0
-    # (label, db_path) pairs — label is the same display name later used
-    # as each Packet's `file` field, so file_times stays keyed consistently
-    # with whatever output ordering ultimately looks it up by.
     file_entries = []
 
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
@@ -523,12 +513,13 @@ def build_subscription_ids_output(session_index, filter_summary=None):
 
 
 COMMAND_FILTER_CHOICES = [
-    {"code": "272", "label": "Credit-Control-Request/Answer", "note": "Request received by PCRF"},
-    {"code": "275", "label": "Session-Termination-Request/Answer", "note": "Request sent as well as received by PCRF"},
-    {"code": "274", "label": "Abort-Session-Request/Answer", "note": "Request sent by PCRF"},
-    {"code": "258", "label": "Re-Auth-Request/Answer", "note": "Request sent by PCRF"},
-    {"code": "265", "label": "AA-Request/Answer", "note": "Authentication-Authorization exchange"},
-    {"code": "8388635", "label": "Spending-Limit-Request/Answer", "note": "Sy interface (OCS spending limit)"},
+    {"code": "272", "abbr": "CCR", "label": "Credit-Control-Request/Answer", "note": "Request received by PCRF"},
+    {"code": "275", "abbr": "STR", "label": "Session-Termination-Request/Answer", "note": "Request sent as well as received by PCRF"},
+    {"code": "274", "abbr": "ASR", "label": "Abort-Session-Request/Answer", "note": "Request sent by PCRF"},
+    {"code": "258", "abbr": "RAR", "label": "Re-Auth-Request/Answer", "note": "Request sent by PCRF"},
+    {"code": "265", "abbr": "AA", "label": "AA-Request/Answer", "note": "Authentication-Authorization exchange"},
+    {"code": "8388635", "abbr": "SLR", "label": "Spending-Limit-Request/Answer", "note": "Sy interface (OCS spending limit)"},
+    {"code": "8388636", "abbr": "SNR", "label": "Spending-Status-Notification-Request/Answer", "note": "Sy interface (OCS spending status notification)"},
 ]
 
 
@@ -681,6 +672,80 @@ def iter_full_session_matches_by_file(
         futures = {
             path: executor.submit(
                 _read_one_file_matches, path, session_ids, (file_names or {}).get(path)
+            )
+            for path in ordered_paths
+        }
+
+        for path in ordered_paths:
+            _, matches = futures[path].result()
+
+            yield path, matches
+
+            completed += 1
+            if progress_callback:
+                progress_callback(completed, total_files, path)
+
+
+def _read_one_file_command_family(path, command_filter, session_ids=None, source_file=None):
+    """Worker for a standalone command-family dump (e.g. every
+    Spending-Status-Notification Request/Answer), independent of
+    --ResultCode. Unlike the Result-Code path there's no request/answer
+    pairing to do here — every packet whose command code matches is a
+    match on its own, output as-is."""
+    matches = [
+        pkt
+        for pkt in read_packets(path, session_ids=session_ids, source_file=source_file)
+        if normalize_command_code(pkt.command) == command_filter
+    ]
+    matches.sort(key=lambda pkt: int(pkt.number))
+    return path, matches
+
+
+def iter_command_family_matches_by_file(
+    paths,
+    command_filter,
+    session_ids=None,
+    progress_callback=None,
+    max_workers=None,
+    file_names=None,
+    file_rank_map=None,
+):
+    """Streams every Request/Answer packet belonging to a single Diameter
+    command family (e.g. Spending-Status-Notification-Request/Answer),
+    independent of any --ResultCode filter. Mirrors
+    iter_full_session_matches_by_file's one-file-at-a-time memory
+    profile (never more than one file's worth of matches alive in this
+    process at once), but filters by command code instead of
+    pairing/correlating by session or result code. `session_ids` is
+    optional: pass the session/subscription/IP-derived set to further
+    narrow the scan (e.g. combined with --session/--subscription/
+    --ipv4/--ipv6), or leave it None to scan every session in the
+    file(s)."""
+
+    if isinstance(paths, str):
+        paths = [paths]
+
+    total_files = len(paths)
+    if total_files == 0:
+        return
+
+    command_filter = normalize_command_code(command_filter)
+
+    if file_rank_map:
+        ordered_paths = sorted(
+            paths,
+            key=lambda p: file_rank_map.get((file_names or {}).get(p) or os.path.basename(p), len(file_rank_map)),
+        )
+    else:
+        ordered_paths = list(paths)
+
+    max_workers = max_workers or min(total_files, os.cpu_count() or 4)
+    completed = 0
+
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            path: executor.submit(
+                _read_one_file_command_family, path, command_filter, session_ids, (file_names or {}).get(path)
             )
             for path in ordered_paths
         }
@@ -1033,10 +1098,9 @@ def iter_output_lines(
 ):
 
     total_sessions = len(session_index)
-    # Pcap chronological order (level-1 sort key everywhere output is
-    # sorted below), derived once from the run's SQLite index rather than
-    # re-derived per code path.
     file_rank_map = session_index.file_rank_map()
+
+    command_filter = normalize_command_code(command_filter) if command_filter else None
 
     if selected_sessions is not None and not selected_sessions and not result_code:
         yield "Reading packets..."
@@ -1103,6 +1167,32 @@ def iter_output_lines(
                 f"(Result stopped at limit={limit} matched requests. "
                 "Increase or disable the limit to see more.)"
             )
+        return
+
+    if command_filter:
+        yield "Reading packets..."
+        yield ""
+        yield f"Found {total_sessions} sessions"
+        if filter_summary:
+            yield f"Filter: {filter_summary}"
+        yield ""
+
+        found = False
+        for _path, matches in iter_command_family_matches_by_file(
+            paths,
+            command_filter,
+            session_ids=selected_sessions,
+            progress_callback=progress_callback,
+            max_workers=max_workers,
+            file_names=file_names,
+            file_rank_map=file_rank_map,
+        ):
+            for pkt in matches:
+                found = True
+                yield format_packet(pkt)
+
+        if not found:
+            yield "No matching packets found."
         return
 
     if selected_sessions is not None:

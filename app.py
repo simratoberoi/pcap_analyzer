@@ -14,6 +14,20 @@ from tool_core import (
     resolve_selected_sessions,
 )
 
+REQUEST_TYPE_ABBR = {
+    "272": "CCR",
+    "275": "STR",
+    "274": "ASR",
+    "258": "RAR",
+    "265": "AA",
+    "8388635": "SLR",
+    "8388636": "SNR",
+}
+
+
+def _chip_label(choice):
+    return choice.get("abbr") or REQUEST_TYPE_ABBR.get(choice["code"]) or choice["label"]
+
 
 st.set_page_config(
     page_title="PCAP Analyzer",
@@ -133,13 +147,36 @@ h1,h2,h3,h4,h5,h6,
    Uniform, subtle look regardless of which command is active; the
    active one gets a light tint instead of solid CTA-blue. */
 
+.st-key-request_type_filters div[data-testid="stHorizontalBlock"]{
+    gap:0.5rem !important;
+    flex-wrap:wrap !important;
+}
+
+.st-key-request_type_filters div[data-testid="column"]{
+    width:auto !important;
+    min-width:0 !important;
+    flex:0 0 auto !important;
+}
+
 .st-key-request_type_filters div[data-testid="stButton"] button{
     background:#ffffff !important;
     border:1px solid #cfd8e6 !important;
     color:rgb(90,99,116) !important;
-    font-weight:500 !important;
-    border-radius:8px !important;
+    font-weight:600 !important;
+    font-size:13px !important;
+    letter-spacing:0.02em;
+    border-radius:999px !important;
     box-shadow:none !important;
+    white-space:nowrap !important;
+    padding:0.35rem 1rem !important;
+    margin:0.15rem 0 !important;
+    min-width:0 !important;
+    width:auto !important;
+    transition:background 0.15s ease, border-color 0.15s ease;
+}
+
+.st-key-request_type_filters div[data-testid="stButton"] button p{
+    white-space:nowrap !important;
 }
 
 .st-key-request_type_filters div[data-testid="stButton"] button:hover{
@@ -152,7 +189,7 @@ h1,h2,h3,h4,h5,h6,
     background:#eaf1fd !important;
     border:1px solid #4285F4 !important;
     color:#1a56c4 !important;
-    font-weight:600 !important;
+    font-weight:700 !important;
 }
 
 .st-key-request_type_filters div[data-testid="stButton"] button[kind="primary"]:hover{
@@ -221,10 +258,11 @@ FILTER_OPTIONS = [
     "Framed IP Address",
     "IPv6 Address",
     "Result Code",
+    "Request Type",
     "List Subscription IDs",
 ]
 
-NO_VALUE_FILTERS = {"List Subscription IDs"}
+NO_VALUE_FILTERS = {"List Subscription IDs", "Request Type"}
 
 if "is_processing" not in st.session_state:
     st.session_state.is_processing = False
@@ -265,13 +303,16 @@ with input_col:
             label_visibility="collapsed",
             disabled=st.session_state.is_processing,
         )
+    elif filter_type == "Request Type":
+        st.caption("Pick a command family below — every Request and Answer of that type will be shown.")
     else:
         st.caption("No value needed — this lists every Subscription ID found in the upload(s).")
 
-    if filter_type == "Result Code":
+    if filter_type in ("Result Code", "Request Type"):
         st.markdown(
             "<div style='color:rgb(38,39,48);margin:0.6rem 0 0.3rem;font-weight:600;'>"
-            "Filter by request type</div>",
+            + ("Filter by request type" if filter_type == "Result Code" else "Select request type")
+            + "</div>",
             unsafe_allow_html=True,
         )
 
@@ -284,10 +325,10 @@ with input_col:
                 with col:
                     is_active = st.session_state.command_filter_choice == choice["code"]
                     if st.button(
-                        choice["label"],
+                        _chip_label(choice),
                         key=f"command_filter_btn_{choice['code']}",
-                        help=choice["note"],
-                        use_container_width=True,
+                        help=f"{choice['label']} — {choice['note']}",
+                        use_container_width=False,
                         type="primary" if is_active else "secondary",
                         disabled=st.session_state.is_processing,
                     ):
@@ -316,6 +357,8 @@ if run_analysis and not st.session_state.is_processing:
         st.error("Select a filter type from the dropdown.")
     elif filter_type not in NO_VALUE_FILTERS and not filter_value.strip():
         st.error("Enter a filter value.")
+    elif filter_type == "Request Type" and not st.session_state.get("command_filter_choice"):
+        st.error("Select a request type below.")
     else:
         st.session_state.is_processing = True
         st.rerun()
@@ -394,17 +437,21 @@ if st.session_state.is_processing:
             )
 
             command_filter = None
-            filter_summary = f"{filter_type} = {value}"
-            if filter_type == "Result Code":
-                active_choice = next(
-                    (
-                        c
-                        for c in COMMAND_FILTER_CHOICES
-                        if c["code"] == st.session_state.get("command_filter_choice")
-                    ),
-                    None,
-                )
-                if active_choice:
+            active_choice = next(
+                (
+                    c
+                    for c in COMMAND_FILTER_CHOICES
+                    if c["code"] == st.session_state.get("command_filter_choice")
+                ),
+                None,
+            )
+
+            if filter_type == "Request Type":
+                command_filter = active_choice["code"] if active_choice else None
+                filter_summary = f"Request Type = {active_choice['label']}" if active_choice else "Request Type"
+            else:
+                filter_summary = f"{filter_type} = {value}"
+                if filter_type == "Result Code" and active_choice:
                     command_filter = active_choice["code"]
                     filter_summary += f", Request Type = {active_choice['label']}"
 

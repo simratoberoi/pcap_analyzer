@@ -51,6 +51,11 @@ COMMAND_METADATA = {
         "request": "Spending-Limit-Request",
         "answer": "Spending-Limit-Answer",
     },
+    "8388636": {
+        "family": "Spending-Status-Notification",
+        "request": "Spending-Status-Notification-Request",
+        "answer": "Spending-Status-Notification-Answer",
+    },
 }
 
 SUPPORTED_RESULT_COMMANDS = set(COMMAND_METADATA)
@@ -130,12 +135,7 @@ def normalize_command_code(value):
     return command_code
 
 
-# These are derived from just a command code (and occasionally a request
-# flag), so the same handful of inputs repeats across every packet in a
-# capture. @lru_cache means we compute the family/label string once per
-# distinct input and hand back the *same* cached string object on every
-# subsequent packet, instead of re-deriving (and re-allocating) it up to
-# millions of times.
+
 @lru_cache(maxsize=None)
 def command_family(command_code):
     command_code = normalize_command_code(command_code)
@@ -176,12 +176,7 @@ def command_code_display(command_code):
     return f"{command_code} ({family})"
 
 
-# NOTE: these used to take the whole tshark `row` dict and build a small
-# dict of *every* packet's flags/bandwidth up front, even when a given
-# search never displays them. Packet now stores only the raw scalar
-# fields (request_flag, proxyable, error_flag, ..., bandwidth_ul/dl) and
-# calls these to assemble the display dict lazily, only when a packet is
-# actually being formatted for output.
+
 def build_flags_dict(request_flag=None, proxyable=None, error=None, retransmitted=None):
     flags = {}
     if request_flag not in (None, ""):

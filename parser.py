@@ -133,9 +133,6 @@ INDEX_FIELDS = _dedupe(
         "diameter.Framed-IPv6-Prefix",
         "diameter.Subscription-Id-Data",
         "diameter.Subscription-Id-Type",
-        # Not used for filtering — carried along so the index build can
-        # derive each file's earliest packet time, which is what the
-        # merged run DB uses to order multiple pcaps chronologically.
         "frame.time_epoch",
     ]
 )
